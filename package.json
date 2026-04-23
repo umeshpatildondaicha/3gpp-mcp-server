@@ -1,0 +1,24 @@
+{
+  "name": "3gpp-mcp-server",
+  "version": "1.0.0",
+  "description": "3GPP Telecom KB — Pure HTTP/SSE MCP Server. No stdio. Runs as a service.",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "3gpp-mcp-server": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["mcp", "3gpp", "telecom", "5g", "sse", "http", "server"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "@huggingface/transformers": "^3.4.0",
+    "@aws-sdk/client-s3": "^3.914.0",
+    "sql.js": "^1.14.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
