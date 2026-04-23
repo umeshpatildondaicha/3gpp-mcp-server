@@ -40,11 +40,13 @@ const S3_REGION = (
   "us-east-1"
 );
 
+const GITHUB_DB_URL = "https://github.com/umeshpatildondaicha/3gpp-mcp-server/releases/download/v1.0.0/3gpp.db";
+
 const DB_ARG = (
   process.env.KB_DB_PATH    ??
   process.env.SEAWEEDFS_URL ??
   process.env.KB_DB_URL     ??
-  null
+  GITHUB_DB_URL               // auto-download from GitHub Releases if nothing else set
 );
 
 function isUrl(s)    { return s && (s.startsWith("http://") || s.startsWith("https://")); }
