@@ -24,14 +24,14 @@ spec:
               value: "3000"
             - name: SESSION_TTL_MS
               value: "1800000"
-            - name: DOWNLOAD_RETRIES
-              value: "3"
+            - name: KB_DB_PATH
+              value: "/home/mcpuser/.3gpp-kb/3gpp.db"
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "250m"
-            limits:
               memory: "2Gi"
+              cpu: "500m"
+            limits:
+              memory: "6Gi"
               cpu: "1000m"
           # Liveness — restart pod if server crashes
           livenessProbe:
@@ -41,14 +41,14 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 30
             failureThreshold: 3
-          # Readiness — wait for DB download + model load before sending traffic
+          # Readiness — wait for DB + model load before sending traffic
           readinessProbe:
             httpGet:
               path: /ready
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 10
-            failureThreshold: 30   # 5 minutes for first-start DB download
+            failureThreshold: 30
           volumeMounts:
             - name: db-cache
               mountPath: /home/mcpuser/.3gpp-kb

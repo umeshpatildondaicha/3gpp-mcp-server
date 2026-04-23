@@ -1,23 +1,24 @@
-FROM node:22-slim
-
-# Non-root user for security
-RUN groupadd -r mcpuser && useradd -r -g mcpuser -m mcpuser
+FROM maven:3.9.9-eclipse-temurin-21 AS build
 
 WORKDIR /app
+COPY pom.xml ./
+COPY src ./src
+RUN mvn -q -DskipTests package
 
-COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+FROM eclipse-temurin:21-jre-jammy
 
-COPY index.js ./
+RUN groupadd -r mcpuser && useradd -r -g mcpuser -m mcpuser
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
-# Cache directory owned by app user
-RUN mkdir -p /home/mcpuser/.3gpp-kb && chown -R mcpuser:mcpuser /home/mcpuser
+COPY --from=build /app/target/3gpp-mcp-server-2.0.0.jar /app/app.jar
 
+RUN mkdir -p /home/mcpuser/.3gpp-kb && chown -R mcpuser:mcpuser /home/mcpuser /app
 USER mcpuser
 
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
-  CMD node -e "fetch('http://localhost:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD ["/bin/sh", "-c", "curl -fsS http://localhost:3000/ready >/dev/null || exit 1"]
 
-CMD ["node", "index.js"]
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
