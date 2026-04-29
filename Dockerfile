@@ -25,11 +25,11 @@ ENV SSL_VAULT_PATH=/opt/visionwaves/sql_ssl \
 RUN mkdir -p $SERVICE_PATH $SSL_VAULT_PATH $LICENSE_VAULT_PATH
 
 # Create directories for SkyWalking agent
-RUN mkdir -p /opt/visionwaves/fms/agent
+RUN mkdir -p /opt/visionwaves/3gpp-mcp/agent
 
 # Copy SkyWalking agent
 COPY ./agent $SERVICE_PATH/agent/
-COPY ./agent /opt/visionwaves/fms/agent/
+COPY ./agent /opt/visionwaves/3gpp-mcp/agent/
 
 # ============================================
 # Add application files

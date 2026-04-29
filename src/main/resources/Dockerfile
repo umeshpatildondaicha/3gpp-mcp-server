@@ -56,8 +56,8 @@ USER $USER_NAME
 # ============================================
 # Health check for Kubernetes
 # ============================================
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:3000/3gpp-mcp-server/actuator/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 \
+    CMD curl -fsS "http://localhost:${MELODY_PORT:-3000}/rest/ping" || exit 1
 
 # ============================================
 # Expose application port
@@ -69,4 +69,4 @@ EXPOSE 3000
 # Logs go to STDOUT (no file tailing needed)
 # Docker/K8s will capture and forward to ELK
 # ============================================
-CMD ["sh", "-c", "java $JAVA_OPTS -jar $SERVICE_PATH/$APP_NAME.jar"]
+CMD ["sh", "-c", "java $JAVA_OPTS -jar $SERVICE_PATH/3gpp-mcp-server-2.0.0.jar"]

@@ -53,4 +53,14 @@ public class OpsController {
         }
         return ResponseEntity.ok(Map.of("ready", true));
     }
+
+    // Liveness/readiness probe endpoint expected by VisionWaves k8s deployment
+    @GetMapping("/rest/ping")
+    public ResponseEntity<Map<String, Object>> ping() {
+        if (!startupState.ready()) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Map.of("status", "starting", "phase", startupState.phase()));
+        }
+        return ResponseEntity.ok(Map.of("status", "ok"));
+    }
 }

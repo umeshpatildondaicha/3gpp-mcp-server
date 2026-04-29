@@ -5,6 +5,11 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.Resource;
@@ -23,22 +28,36 @@ public class DbResolver {
     }
 
     public Path resolveDb() {
-        if (!appProperties.hasLocalDbPath()) {
-            throw new IllegalStateException("KB_DB_PATH is required. This service is configured for local DB only.");
-        }
-
-        String dbPath = appProperties.kbDbPath();
+        String dbPath = appProperties.hasLocalDbPath()
+                ? appProperties.kbDbPath()
+                : "classpath:3gpp.db";
 
         if (dbPath.startsWith("classpath:")) {
             return resolveClasspathDb(dbPath);
         }
 
         Path localPath = Path.of(dbPath);
-        if (!Files.exists(localPath)) {
-            throw new IllegalStateException("DB file not found: " + localPath);
+        if (Files.exists(localPath) && isValidKbDb(localPath)) {
+            log.info("using local DB: {}", localPath);
+            return localPath;
         }
-        log.info("using local DB: {}", localPath);
-        return localPath;
+
+        // Configured filesystem path is missing or unusable — fall back to bundled
+        // classpath DB so a stale KB_DB_PATH env var or broken sidecar file can't
+        // crash the pod. The DB ships inside the JAR via classpath:3gpp.db.
+        log.warn("Configured DB path {} not usable; falling back to classpath:3gpp.db", localPath);
+        return resolveClasspathDb("classpath:3gpp.db");
+    }
+
+    private boolean isValidKbDb(Path path) {
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + path.toAbsolutePath());
+             Statement s = c.createStatement();
+             ResultSet rs = s.executeQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'")) {
+            return rs.next();
+        } catch (SQLException e) {
+            log.warn("DB at {} failed validation: {}", path, e.getMessage());
+            return false;
+        }
     }
 
     private Path resolveClasspathDb(String classpathLocation) {

@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -42,14 +43,32 @@ public class ThreeGppToolService {
     }
 
     @Tool(description = "Semantic search across 3GPP specifications. Optional filters: series, release, docType.")
-    public String search3gpp(String query, Integer topK, String series, String release, String docType) throws SQLException {
+    public String search3gpp(
+            @ToolParam(description = "Natural language search query") String query,
+            @ToolParam(required = false, description = "Number of results to return (1-50, default 10)") Integer topK,
+            @ToolParam(required = false, description = "Filter by 3GPP series, e.g. \"38\" for 5G NR") String series,
+            @ToolParam(required = false, description = "Filter by release, e.g. \"Rel-18\"") String release,
+            @ToolParam(required = false, description = "Filter by document type, e.g. \"TS\" or \"TR\"") String docType
+    ) throws SQLException {
+        String q = defaultValue(query, "");
+        if (q.isBlank()) {
+            return "Query is empty. Provide a natural-language search term, e.g. \"NR initial access\".";
+        }
+        if (series != null && !series.isBlank() && !kbDataService.indexedSeries().contains(series)) {
+            return "Series '" + series + "' is not in the indexed knowledge base. "
+                    + "Indexed series: " + String.join(", ", kbDataService.indexedSeries().stream().sorted().toList())
+                    + ". Use the listSeries tool to see all 3GPP series and which are indexed.";
+        }
         int k = topK == null ? 10 : Math.max(1, Math.min(50, topK));
-        List<SearchHit> hits = kbDataService.search(embeddingService.embed(defaultValue(query, "")), k, series, release, docType);
-        return formatHits(hits, query);
+        List<SearchHit> hits = kbDataService.search(embeddingService.embed(q), k, series, release, docType);
+        return formatHits(hits, q);
     }
 
     @Tool(description = "Retrieve text chunks of a specific 3GPP spec by ID. Example specId: 38.331")
-    public String getSpecInfo(String specId, Integer maxChunks) throws SQLException {
+    public String getSpecInfo(
+            @ToolParam(description = "3GPP spec ID, e.g. \"38.331\"") String specId,
+            @ToolParam(required = false, description = "Max chunks to return (1-20, default 5)") Integer maxChunks
+    ) throws SQLException {
         int chunks = maxChunks == null ? 5 : Math.max(1, Math.min(20, maxChunks));
         List<Map<String, Object>> rows = kbDataService.getSpecChunks(defaultValue(specId, ""), chunks);
         if (rows.isEmpty()) {
@@ -73,7 +92,10 @@ public class ThreeGppToolService {
     }
 
     @Tool(description = "List all 3GPP specs, optionally filtered by series or release.")
-    public String listSpecs(String series, String release) throws SQLException {
+    public String listSpecs(
+            @ToolParam(required = false, description = "Filter by 3GPP series, e.g. \"38\"") String series,
+            @ToolParam(required = false, description = "Filter by release, e.g. \"Rel-18\"") String release
+    ) throws SQLException {
         List<Map<String, Object>> specs = kbDataService.listSpecs(series, release);
         if (specs.isEmpty()) {
             return "No specs found.";
@@ -130,7 +152,7 @@ public class ThreeGppToolService {
 
     private String formatHits(List<SearchHit> hits, String query) {
         if (hits.isEmpty()) {
-            return "No results found.";
+            return "No results found for: \"" + query + "\"";
         }
         List<String> lines = new ArrayList<>();
         lines.add("Search results for: \"" + query + "\"");
@@ -138,10 +160,13 @@ public class ThreeGppToolService {
         lines.add("");
         for (int i = 0; i < hits.size(); i++) {
             SearchHit h = hits.get(i);
+            String snippet = h.snippet() == null || h.snippet().isBlank()
+                    ? "(chunk has no extractable text — call getSpecInfo for full content)"
+                    : h.snippet().replaceAll("\\s+", " ").strip();
             lines.add("[" + (i + 1) + "] " + h.specId() + " | " + h.release() + " | Score: " + h.score());
             lines.add("    Title  : " + h.title());
             lines.add("    Series : " + h.seriesDesc());
-            lines.add("    Excerpt: " + h.snippet());
+            lines.add("    Excerpt: " + snippet);
             lines.add("");
         }
         return String.join("\n", lines);

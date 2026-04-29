@@ -28,8 +28,8 @@ public class KbDataService {
     private static final int DIM = 384;
 
     private volatile float[] allEmbeddings;
-    private volatile long[] chunkIds;
-    private volatile Map<Long, ChunkMeta> chunkMeta;
+    private volatile String[] chunkIds;
+    private volatile Map<String, ChunkMeta> chunkMeta;
     private volatile Connection connection;
 
     public void init(Path dbPath, StartupState startupState) throws SQLException, IOException {
@@ -41,20 +41,20 @@ public class KbDataService {
 
     private void loadEmbeddings() throws SQLException, IOException {
         log.info("loading embeddings...");
-        List<Long> ids = new ArrayList<>();
+        List<String> ids = new ArrayList<>();
         List<float[]> vectors = new ArrayList<>();
 
         try (Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery("SELECT chunk_id, vector FROM embeddings ORDER BY rowid")) {
             while (rs.next()) {
-                ids.add(rs.getLong("chunk_id"));
+                ids.add(rs.getString("chunk_id"));
                 vectors.add(vectorFromBlob(rs.getBytes("vector")));
             }
         }
 
         int n = vectors.size();
         float[] embeddingFlat = new float[n * DIM];
-        long[] idArray = new long[n];
+        String[] idArray = new String[n];
         for (int i = 0; i < n; i++) {
             idArray[i] = ids.get(i);
             System.arraycopy(vectors.get(i), 0, embeddingFlat, i * DIM, DIM);
@@ -65,11 +65,11 @@ public class KbDataService {
     }
 
     private void loadChunkMeta() throws SQLException {
-        Map<Long, ChunkMeta> meta = new HashMap<>();
+        Map<String, ChunkMeta> meta = new HashMap<>();
         try (Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery("SELECT id, spec_id, release, series, series_desc, doc_type, title FROM chunks")) {
             while (rs.next()) {
-                long id = rs.getLong("id");
+                String id = rs.getString("id");
                 meta.put(id, new ChunkMeta(
                         id,
                         rs.getString("spec_id"),
@@ -93,7 +93,7 @@ public class KbDataService {
                 if (meta == null) {
                     continue;
                 }
-                ps.setLong(1, id.chunkId());
+                ps.setString(1, id.chunkId());
                 try (ResultSet rs = ps.executeQuery()) {
                     String text = rs.next() ? rs.getString("text") : "";
                     String snippet = text.length() > 400 ? text.substring(0, 400) + "..." : text;
@@ -184,21 +184,21 @@ public class KbDataService {
     }
 
     public int vectorCount() {
-        long[] ids = chunkIds;
+        String[] ids = chunkIds;
         return ids == null ? 0 : ids.length;
     }
 
     private List<ScoredId> cosineTopK(float[] qvec, int k, String series, String release, String docType) {
-        long[] ids = chunkIds;
+        String[] ids = chunkIds;
         float[] embeddings = allEmbeddings;
-        Map<Long, ChunkMeta> metaMap = chunkMeta;
+        Map<String, ChunkMeta> metaMap = chunkMeta;
         if (ids == null || embeddings == null || metaMap == null) {
             return List.of();
         }
 
         List<ScoredId> results = new ArrayList<>();
         for (int i = 0; i < ids.length; i++) {
-            long id = ids[i];
+            String id = ids[i];
             ChunkMeta meta = metaMap.get(id);
             if (meta == null) {
                 continue;
@@ -244,6 +244,6 @@ public class KbDataService {
         return map;
     }
 
-    private record ScoredId(long chunkId, float score) {
+    private record ScoredId(String chunkId, float score) {
     }
 }
