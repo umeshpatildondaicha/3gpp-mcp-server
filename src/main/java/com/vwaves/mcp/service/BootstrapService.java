@@ -33,6 +33,18 @@ public class BootstrapService {
             Path dbPath = dbResolver.resolveDb();
             kbDataService.init(dbPath, startupState);
             embeddingService.init(startupState);
+
+            String indexed = kbDataService.embedModelName();
+            String runtime = embeddingService.modelName();
+            if (indexed != null && !indexed.equalsIgnoreCase(runtime)) {
+                throw new IllegalStateException(
+                        "Embedding model mismatch — index built with '" + indexed
+                                + "' but runtime is '" + runtime
+                                + "'. Set app.embed-model-name and the spring.ai.embedding.transformer.* "
+                                + "URIs to match the index, or rebuild the index.");
+            }
+            log.info("embedding model match OK (index='{}', runtime='{}')", indexed, runtime);
+
             startupState.phase("ready");
             startupState.ready(true);
             log.info("HTTP/SSE MCP server ready.");

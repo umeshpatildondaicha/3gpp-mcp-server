@@ -36,10 +36,16 @@ public class ThreeGppToolService {
 
     private final EmbeddingService embeddingService;
     private final KbDataService kbDataService;
+    private final GlossaryService glossaryService;
 
-    public ThreeGppToolService(EmbeddingService embeddingService, KbDataService kbDataService) {
+    public ThreeGppToolService(
+            EmbeddingService embeddingService,
+            KbDataService kbDataService,
+            GlossaryService glossaryService
+    ) {
         this.embeddingService = embeddingService;
         this.kbDataService = kbDataService;
+        this.glossaryService = glossaryService;
     }
 
     @Tool(description = "Semantic search across 3GPP specifications. Optional filters: series, release, docType.")
@@ -60,7 +66,12 @@ public class ThreeGppToolService {
                     + ". Use the listSeries tool to see all 3GPP series and which are indexed.";
         }
         int k = topK == null ? 10 : Math.max(1, Math.min(50, topK));
-        List<SearchHit> hits = kbDataService.search(embeddingService.embed(q), k, series, release, docType);
+        // Append acronym expansions so both BM25 and the embedder see the long form.
+        String expanded = glossaryService.expand(q);
+        List<SearchHit> hits = kbDataService.hybridSearch(
+                expanded,
+                embeddingService.embed(expanded),
+                k, series, release, docType);
         return formatHits(hits, q);
     }
 

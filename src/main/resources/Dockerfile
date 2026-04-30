@@ -1,7 +1,7 @@
 # ============================================
 # Multi-stage build for optimized image size
 # ============================================
-FROM container.visionwaves.com/visionwaves/alpine-fixed:3.20.3
+FROM eclipse-temurin:21-jre-jammy
 
 
 # Set TimeZone
@@ -44,7 +44,7 @@ RUN rm -rf $SERVICE_PATH/ImportTemplateFiles \
 # ============================================
 # Create non-root user for security
 # ============================================
-RUN adduser -D -u 1001 $USER_NAME && \
+RUN useradd -r -u 1001 -m -s /bin/bash $USER_NAME && \
     chown -R $USER_NAME:$USER_NAME $SERVICE_PATH
 
 # Set working directory
