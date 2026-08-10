@@ -67,11 +67,14 @@ spec:
             - { name: EMBED_TOKENIZER_URI,    value: "http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/bge-m3/tokenizer.json" }
             - { name: RERANKER_MODEL_URI,     value: "http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/mxbai/model_quantized.onnx" }
             - { name: RERANKER_TOKENIZER_URI, value: "http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/mxbai/tokenizer.json" }
-            # Latency lever, measured 2026-08-10 on the Aug-3 DBs: 12 candidates
-            # cuts median 3.6s→2.1s but drops OAM TOP5 88%→82% (TOP1 62%→60%).
-            # Shipping with the default 24 — accuracy wins. Uncomment only if
-            # latency is still a problem after CPU/replica/timeout fixes land.
-            # - { name: RERANK_CANDIDATES, value: "12" }
+            # Latency/accuracy trade, measured 2026-08-10 on the PRODUCTION DBs
+            # (bench/benchmark_oam.py, 50 questions — 1 step ≈ 1 TOP5 question):
+            #   24 cand / 384 tok : 3.6 s  TOP1 50%  TOP5 86%   (code default)
+            #   24 cand / 256 tok : 2.4 s  TOP1 52%  TOP5 84%   <- SHIPPED
+            #   16 cand / 256 tok : 1.8 s  TOP1 54%  TOP5 82%   (latency emergency)
+            # Re-run the benchmark before moving between rows.
+            - { name: RERANKER_MAX_LENGTH, value: "256" }
+            # - { name: RERANK_CANDIDATES, value: "16" }   # the 1.8s row
           resources:
             requests:
               # 500m was proven too low (probe-tripping CPU throttling). The
