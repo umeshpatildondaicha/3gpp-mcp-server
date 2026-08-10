@@ -1,0 +1,101 @@
+# Non-3GPP intent terms — one per line, '#' comments ignored.
+# When the query contains any of these tokens, the extras-DB discount is lifted
+# (extrasDbWeight = neutral instead of 0.5). Used to surface ITU-T / IETF / NFV /
+# O-RAN content for domain-appropriate queries.
+#
+# Maintenance rule: add a term here only if a regression query proves it is needed.
+# False positives here weaken 3GPP-domain results.
+
+# ITU-T explicit
+itu
+itu-t
+g.709
+g.798
+g.806
+g.872
+g.8032
+g.8275
+y.1731
+g.873
+
+# IETF explicit
+rfc
+ietf
+
+# ETSI NFV / virtualization
+nfv
+vnf
+cnf
+vnfm
+nfvo
+etsi
+
+# O-RAN explicit
+o-ran
+oran
+fronthaul
+ru-du
+
+# Optical / OTN / DWDM domain
+optical
+otn
+dwdm
+sdh
+wavelength
+los-p
+los-o
+dlos
+dlof
+doci
+
+# IP / transport routing protocols
+bgp
+bfd
+ospf
+isis
+ldp
+rsvp
+netconf
+yang
+restconf
+gnmi
+
+# Sync / timing
+ptp
+synce
+syncE
+
+# Carrier Ethernet
+ercs
+y1731
+cfm
+
+# Vendors that route to ITU/IETF/vendor docs
+adva
+ciena
+infinera
+juniper
+
+# MPLS / L2VPN / pseudowire transport
+# Added 2026-07-28 after "VPN Pseudowire Down leading to Link Down" returned
+# 23.060 / 23.007 / 29.274 / 23.501. None of these words was listed, so the
+# extras DB kept its 0.50 discount and 3GPP specs won a question 3GPP does not
+# cover at all — the corpus has 0 chunks mentioning pseudowire in the 3GPP DB.
+mpls
+pseudowire
+pseudo-wire
+pwe3
+l2vpn
+l3vpn
+vpws
+vpls
+evpn
+vrf
+vc-label
+
+# Interface / link state (RFC 2863 IF-MIB territory, not 3GPP)
+ifoperstatus
+ifadminstatus
+linkup
+linkdown
+if-mib

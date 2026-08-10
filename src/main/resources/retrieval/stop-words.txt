@@ -1,0 +1,121 @@
+# BM25 stop-word list for 3GPP retrieval — one token per line, '#' comments ignored.
+# Stripped from FTS/AND query construction only. Embedding path keeps full sentence;
+# the cross-encoder reranker handles relevance disambiguation.
+# Tune by adding lines here; no recompile required.
+
+# Question / command words
+what
+how
+does
+when
+where
+which
+who
+why
+explain
+describe
+tell
+list
+find
+show
+give
+resolve
+can
+could
+should
+would
+do
+is
+are
+was
+were
+
+# Articles / conjunctions / prepositions
+the
+and
+for
+but
+not
+with
+this
+that
+from
+they
+will
+have
+has
+had
+been
+may
+might
+into
+onto
+over
+upon
+after
+before
+during
+since
+until
+while
+also
+then
+to
+of
+in
+on
+at
+by
+an
+or
+
+# Zero-discriminative token: appears in every 3GPP document
+3gpp
+
+# 3GPP document structure words (high-frequency, zero discriminative value)
+shall
+section
+clause
+table
+figure
+refer
+according
+following
+above
+below
+see
+per
+defined
+specified
+based
+used
+using
+given
+
+# Natural-language causative/connective words that appear in user queries
+# but never in technical standards text
+causing
+caused
+leads
+leading
+triggers
+triggered
+results
+occurs
+happens
+makes
+gets
+becomes
+
+# Vendor names. These DO occur in the corpus (nokia 1029, ericsson 1086,
+# huawei 833, zte 532, samsung 325 chunks) but only as TR contributor lists,
+# reference-document credits and font names — never as technical content. Left
+# unfiltered they consume AND-query slots (and-term-limit=4) and force the
+# whole query to the OR fallback, which is exactly what breaks vendor CM audit
+# questions like "allowed range for Nokia siPeriodicity". classifyIntent()
+# still sees the raw query, so the OUT_OF_SCOPE hint is unaffected.
+nokia
+ericsson
+huawei
+samsung
+zte

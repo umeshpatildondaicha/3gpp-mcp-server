@@ -1,0 +1,26 @@
+# series-catalog.tsv — 3GPP series number → description.
+#
+# Used by listSeries and by the series_desc shown on search results. Was a
+# Map.ofEntries(...) in ThreeGppToolService; moved here so the catalogue can be
+# corrected or extended without a recompile.
+#
+# Format:  series <TAB> description
+
+21	Vocabulary, Requirements
+22	Service Aspects & Stage 1
+23	Architecture & Stage 2
+24	Signalling & Stage 3 (UE-Network)
+25	UTRAN / WCDMA Radio Access
+26	Codecs & Media
+27	Data
+28	Telecom Management (OAM)
+29	Core Network Protocols
+31	SIM / USIM
+32	OAM & Charging
+33	Security
+34	Test Specifications
+35	Security Algorithms
+36	LTE / E-UTRAN (4G)
+37	Multi-RAT / Co-existence
+38	NR / 5G Radio Access
+45	GSM / EDGE Radio Access

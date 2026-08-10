@@ -1,0 +1,138 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production deployment — multi-replica, fully offline (everything from S3).
+#
+# Design decisions, each backed by a measurement (2026-08-10 local test):
+#   • STATELESS MCP protocol → any pod can serve any request, no session
+#     affinity, safe round-robin. This is what makes replicas = parallelism.
+#   • One JVM saturates at ~1.5× its sequential throughput (0.5→0.78 q/s at
+#     4 concurrent callers, per-call latency 1.9s→5s). Do NOT try to push
+#     concurrency into a pod — add pods. 4 replicas ≈ 4× throughput with no
+#     latency penalty.
+#   • Startup was the outage: ~755 MB of model downloads from the internet on
+#     every container start blew the liveness budget → 227 restarts. Now:
+#     models come from in-cluster S3 via the app's own *_URI envs, DBs via the
+#     initContainer, libtorch is inside the jar (pom pytorch-native-cpu dep).
+#     Startup measured at 13–21 s.
+#   • startupProbe gives 10 min of grace ONLY at startup; liveness stays tight
+#     afterwards. timeoutSeconds ≥ 10 everywhere — under a search burst the
+#     health endpoint answers slowly and a 1 s probe budget kills healthy pods.
+#
+# Object store: SeaweedFS filer over plain HTTP — no S3 credentials anywhere.
+# The URL below is the STAGING cluster's filer. Before deploying to the
+# PRODUCTION cluster: confirm its filer service DNS and upload the same
+# 3gpp-models/{bge-m3,mxbai,3gpp_kb} tree to its 'performance' bucket.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-3gpp-service
+  labels:
+    app.kubernetes.io/name: mcp-3gpp-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-3gpp-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-3gpp-service
+    spec:
+      # DBs must be a local file for SQLite (random access). Pull once per pod
+      # from S3 into an emptyDir; survives container restarts within the pod.
+      initContainers:
+        - name: fetch-kb
+          image: curlimages/curl:8.10.1
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              [ -s /kb/3gpp_certified.db ] || curl -fSo /kb/3gpp_certified.db  http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/3gpp_kb/3gpp_certified.db
+              [ -s /kb/telecom_extras.db ] || curl -fSo /kb/telecom_extras.db  http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/3gpp_kb/telecom_extras.db
+              ls -lh /kb
+          volumeMounts:
+            - { name: kb-data, mountPath: /kb }
+      containers:
+        - name: mcp-3gpp-service
+          image: container.rtl.local/railtel/3gpp-mcp:<NEW_TAG>   # jar with bundled pytorch natives
+          ports:
+            - { name: http, containerPort: 3000 }
+          env:
+            - { name: MCP_PROTOCOL, value: "STATELESS" }
+            - { name: SERVER_SERVLET_CONTEXT_PATH, value: "/mcp-3gpp-service" }
+            - { name: KB_DB_PATH,  value: "/var/lib/3gpp-kb/3gpp_certified.db" }
+            - { name: KB_DB_PATH2, value: "/var/lib/3gpp-kb/telecom_extras.db" }
+            # Models fetched by the app itself from in-cluster S3 (HTTP GET).
+            - { name: EMBED_MODEL_URI,        value: "http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/bge-m3/model_quantized.onnx" }
+            - { name: EMBED_TOKENIZER_URI,    value: "http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/bge-m3/tokenizer.json" }
+            - { name: RERANKER_MODEL_URI,     value: "http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/mxbai/model_quantized.onnx" }
+            - { name: RERANKER_TOKENIZER_URI, value: "http://seaweedfs-filer.swf.svc.cluster.local:8888/buckets/performance/3gpp-models/mxbai/tokenizer.json" }
+            # Latency lever, measured 2026-08-10 on the Aug-3 DBs: 12 candidates
+            # cuts median 3.6s→2.1s but drops OAM TOP5 88%→82% (TOP1 62%→60%).
+            # Shipping with the default 24 — accuracy wins. Uncomment only if
+            # latency is still a problem after CPU/replica/timeout fixes land.
+            # - { name: RERANK_CANDIDATES, value: "12" }
+          resources:
+            requests:
+              # 500m was proven too low (probe-tripping CPU throttling). The
+              # pipeline is CPU-bound: embedding + 196k-vector scan + rerank.
+              cpu: "2"
+              memory: "3Gi"
+            limits:
+              cpu: "3"
+              memory: "6Gi"
+          # Grace ONLY while starting: up to 10 min (S3 fetch + model load,
+          # normally 13–21 s). Liveness takes over after first success.
+          startupProbe:
+            httpGet: { path: /mcp-3gpp-service/actuator/health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /mcp-3gpp-service/actuator/health/liveness, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /mcp-3gpp-service/actuator/health/readiness, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: kb-data, mountPath: /var/lib/3gpp-kb }
+      volumes:
+        - name: kb-data
+          emptyDir: {}          # disk-backed; do NOT use medium: Memory (3.4 GB would count as RAM)
+---
+# Plain ClusterIP round-robin is the parallelism strategy: STATELESS pods make
+# every replica interchangeable. No sessionAffinity — sticky sessions would
+# defeat the scale-out.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-3gpp-service
+spec:
+  selector:
+    app.kubernetes.io/name: mcp-3gpp-service
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Optional: scale on sustained CPU. Each pod adds ~0.5–0.8 q/s.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mcp-3gpp-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mcp-3gpp-service
+  minReplicas: 4
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

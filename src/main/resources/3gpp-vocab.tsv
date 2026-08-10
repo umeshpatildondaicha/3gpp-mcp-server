@@ -1,0 +1,123 @@
+# 3GPP acronym → expansion glossary (TSV: ABBREV<TAB>expansion).
+# Lines beginning with '#' are ignored. Keys upper-cased.
+# Source: 3GPP TR 21.905 (Vocabulary for 3GPP Specifications) plus common spec terminology.
+#
+# How this is used:
+#   - GlossaryService.expand(query) appends the expansion when an abbreviation appears in the query
+#   - The expanded query feeds the BM25 OR-fallback path and the dense embedding path
+#   - It does NOT feed the BM25 AND path (kept for precision)
+#
+# Maintenance rule: add an entry only when (a) the abbreviation is widely used in queries and
+# (b) the expansion materially improves recall on a benchmark query.
+
+# ── Core 5G System (5GS) network functions ──────────────────────────────────
+AMF	Access and Mobility Management Function
+SMF	Session Management Function
+UPF	User Plane Function
+PCF	Policy Control Function
+UDM	Unified Data Management
+UDR	Unified Data Repository
+UDSF	Unstructured Data Storage Function
+AUSF	Authentication Server Function
+NRF	Network Repository Function
+NSSF	Network Slice Selection Function
+NEF	Network Exposure Function
+N3IWF	Non-3GPP InterWorking Function
+SCP	Service Communication Proxy
+SEPP	Security Edge Protection Proxy
+TNGF	Trusted Non-3GPP Gateway Function
+W-AGF	Wireline Access Gateway Function
+CHF	Charging Function
+NWDAF	Network Data Analytics Function
+
+# ── 5G NR / RAN ─────────────────────────────────────────────────────────────
+GNB	gNodeB next generation NodeB
+ENB	eNodeB evolved NodeB
+NG-RAN	NG Radio Access Network
+E-UTRAN	Evolved UMTS Terrestrial Radio Access Network 4G LTE
+NR	New Radio 5G
+RAN	Radio Access Network
+CU	Centralized Unit
+DU	Distributed Unit
+RU	Radio Unit
+CU-CP	Centralized Unit Control Plane
+CU-UP	Centralized Unit User Plane
+
+# ── EPC (LTE / 4G) ──────────────────────────────────────────────────────────
+MME	Mobility Management Entity
+HSS	Home Subscriber Server
+SGW	Serving Gateway Serving GW
+PGW	PDN Gateway PDN GW
+PCRF	Policy and Charging Rules Function
+EPC	Evolved Packet Core
+EPS	Evolved Packet System
+
+# ── Protocols / interfaces ──────────────────────────────────────────────────
+NAS	Non-Access Stratum
+RRC	Radio Resource Control
+PDCP	Packet Data Convergence Protocol
+RLC	Radio Link Control
+MAC	Medium Access Control
+SDAP	Service Data Adaptation Protocol
+NGAP	NG Application Protocol
+S1AP	S1 Application Protocol
+X2AP	X2 Application Protocol
+F1AP	F1 Application Protocol
+E1AP	E1 Application Protocol
+GTP	GPRS Tunneling Protocol
+GTP-U	GTP User Plane
+GTP-C	GTP Control Plane
+PFCP	Packet Forwarding Control Protocol
+DIAMETER	Diameter authentication accounting
+
+# ── IMS / VoLTE ─────────────────────────────────────────────────────────────
+IMS	IP Multimedia Subsystem
+MMTEL	Multimedia Telephony
+P-CSCF	Proxy Call Session Control Function
+S-CSCF	Serving Call Session Control Function
+I-CSCF	Interrogating Call Session Control Function
+SBC	Session Border Controller
+
+# ── Slicing / SBA ───────────────────────────────────────────────────────────
+NSI	Network Slice Instance
+NSSI	Network Slice Subnet Instance
+SST	Slice Service Type
+S-NSSAI	Single Network Slice Selection Assistance Information
+NSSAI	Network Slice Selection Assistance Information
+SBA	Service Based Architecture
+
+# ── PDU / QoS ───────────────────────────────────────────────────────────────
+PDU	Protocol Data Unit
+SDU	Service Data Unit
+QoS	Quality of Service
+QFI	QoS Flow Identifier
+DRB	Data Radio Bearer
+SRB	Signalling Radio Bearer
+
+# ── OAM / Management ────────────────────────────────────────────────────────
+OAM	Operation Administration Maintenance
+NRM	Network Resource Model
+IOC	Information Object Class
+MNS	Management Service
+MOI	Managed Object Instance
+KPI	Key Performance Indicator
+PM	Performance Management
+FM	Fault Management
+CM	Configuration Management
+PRB	Physical Resource Block
+SON	Self Organizing Network
+MDT	Minimization of Drive Tests
+
+# ── Identifiers ─────────────────────────────────────────────────────────────
+IMSI	International Mobile Subscriber Identity
+SUPI	Subscription Permanent Identifier
+SUCI	Subscription Concealed Identifier
+GUTI	Globally Unique Temporary Identifier
+PEI	Permanent Equipment Identifier
+PLMN	Public Land Mobile Network
+
+# ── Data / charging ─────────────────────────────────────────────────────────
+DN	Data Network
+DNN	Data Network Name
+APN	Access Point Name
+CDR	Charging Data Record

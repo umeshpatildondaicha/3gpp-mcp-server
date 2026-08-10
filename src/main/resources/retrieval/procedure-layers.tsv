@@ -1,0 +1,56 @@
+# procedure-layers.tsv — the specification layers getProcedureFlow retrieves from.
+#
+# A 3GPP procedure is never in one spec: the flow is in a stage-2 architecture
+# spec, the messages in a stage-3 signalling spec, the radio legs elsewhere. This
+# table declares which layers exist, in what order, and which spec families each
+# generation prefers. It replaces a hard-coded list in ThreeGppToolService.
+#
+# Two row types, tab-separated, first column names the type.
+#
+#   layer <TAB> series <TAB> order <TAB> technology <TAB> perLayer <TAB> prefer <TAB> label
+#   alias <TAB> input word <TAB> canonical technology
+#
+# Layer columns:
+#   series      3GPP series number to scope the retrieval to
+#   order       ascending display order; also the natural reading order of a flow
+#   technology  5G | LTE | ANY — which requests this row applies to.
+#               A request for technology=5G runs rows marked 5G and ANY.
+#   perLayer    max chunks from this layer before the evidence floor is applied
+#   prefer      comma-separated spec-id prefixes boosted WITHIN this layer, or "-"
+#   label       human heading printed above the layer's evidence
+#
+# WHY `prefer` EXISTS
+# `technology` used to gate only the radio layer, so an LTE question still had
+# 23.502 (5G procedures) competing against 23.401 (EPS procedures) in the core
+# layer. Measured: "EPS attach" scoped to series 23 returned 23.502 at 0.768 and
+# pushed 23.401 down to rank 4 (0.648). `prefer` is a ranking boost, NOT a hard
+# filter — cross-generation evidence still surfaces when genuinely relevant,
+# which matters for interworking procedures like SRVCC and EPS fallback.
+#
+# After editing, re-run: python3 bench/run_procflow.py
+
+# ── technology aliases: how callers spell a generation → canonical value ─────
+alias	4g	lte
+alias	eps	lte
+alias	epc	lte
+alias	e-utran	lte
+alias	lte	lte
+alias	5g	5g
+alias	5gs	5g
+alias	5gc	5g
+alias	nr	5g
+alias	sa	5g
+alias	both	both
+alias	all	both
+
+# ── layers ───────────────────────────────────────────────────────────────────
+# layer	series	order	technology	perLayer	prefer	label
+layer	23	10	5G	4	23.5	Stage 2 — 5GS architecture & procedure flow
+layer	23	10	LTE	4	23.4,23.06,23.00	Stage 2 — EPS architecture & procedure flow
+layer	24	20	5G	3	24.5	Stage 3 — 5GS NAS / UE-network signalling
+layer	24	20	LTE	3	24.3	Stage 3 — EPS NAS / UE-network signalling
+layer	29	30	ANY	2	-	Stage 3 — core network protocols
+layer	38	40	5G	3	-	5G NR radio access (RRC / NGAP / XnAP / F1AP)
+layer	36	40	LTE	3	-	LTE / E-UTRAN radio access (RRC / S1AP / X2AP)
+layer	33	50	5G	2	33.5	Security
+layer	33	50	LTE	2	33.4	Security

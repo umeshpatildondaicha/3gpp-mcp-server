@@ -16,8 +16,8 @@ public class EmbeddingService {
 
     public EmbeddingService(
             EmbeddingModel embeddingModel,
-            @Value("${app.embed-model-name:all-MiniLM-L6-v2}") String modelName,
-            @Value("${app.embed-dim:384}") int dim
+            @Value("${app.embed-model-name:BAAI/bge-m3}") String modelName,
+            @Value("${app.embed-dim:1024}") int dim
     ) {
         this.embeddingModel = embeddingModel;
         this.modelName = modelName;

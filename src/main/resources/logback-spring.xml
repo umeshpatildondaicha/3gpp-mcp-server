@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logging for local debugging.
+
+  Three destinations:
+    console          — everything, as before (unchanged behaviour when tailing mvn)
+    logs/3gpp-mcp.log — everything, so a detached server is still debuggable
+    logs/queries.log  — ONE structured JSON line per search3gpp call
+
+  The queries file is the split QueryLogger's javadoc asks for: it routes the
+  dedicated 'telecom_kb.queries' logger to its own appender with additivity=false,
+  so per-query records stay out of the noisy application log and can be replayed
+  with jq. Without this file those lines land in the general log prefixed 'QLOG'.
+
+  Levels are env-overridable so you can raise verbosity without editing this file:
+    LOG_LEVEL_APP=DEBUG ./start.sh dev      # our own retrieval/rerank internals
+    LOG_LEVEL_ROOT=DEBUG ./start.sh dev     # everything, including Spring
+-->
+<configuration>
+
+    <property name="LOG_DIR" value="${LOG_DIR:-logs}"/>
+    <property name="PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} -- %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder><pattern>${PATTERN}</pattern></encoder>
+    </appender>
+
+    <appender name="APP_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/3gpp-mcp.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/3gpp-mcp.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder><pattern>${PATTERN}</pattern></encoder>
+    </appender>
+
+    <!-- Per-query JSON records. No level/thread prefix: each line is parseable
+         on its own, so `jq` can read the file directly. -->
+    <appender name="QUERY_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/queries.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/queries.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>14</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <!-- QueryLogger emits "QLOG {json}" — the prefix exists so the lines are
+             greppable when they fall through to the general log. Here the logger
+             has its own file, so strip it and leave one bare JSON object per line:
+                 jq -r '[.query, (.top[0].spec_id), (.top[0].score)] | @tsv' logs/queries.log -->
+        <encoder><pattern>%replace(%msg){'^QLOG ', ''}%n</pattern></encoder>
+    </appender>
+
+    <!-- QueryLogger's dedicated logger. additivity=false keeps these lines out
+         of the console and the application log. -->
+    <logger name="telecom_kb.queries" level="INFO" additivity="false">
+        <appender-ref ref="QUERY_FILE"/>
+    </logger>
+
+    <!-- Our own code — raise to DEBUG to trace retrieval and reranking. -->
+    <logger name="com.vwaves.mcp" level="${LOG_LEVEL_APP:-INFO}"/>
+
+    <root level="${LOG_LEVEL_ROOT:-INFO}">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="APP_FILE"/>
+    </root>
+
+</configuration>

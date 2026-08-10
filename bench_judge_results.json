@@ -1,0 +1,39 @@
+{
+  "judge": "claude-opus-4-7 (in-session, manual)",
+  "scope": "first-hit body of each search3gpp response (representative sample, not exhaustive across all 5 hits)",
+  "rubric": {
+    "verdict": ["equivalent", "minor_loss", "major_loss"],
+    "definitions": {
+      "equivalent": "no answer-relevant content lost",
+      "minor_loss": "peripheral context dropped, core answer still derivable",
+      "major_loss": "a fact a consumer would need to answer the question is missing"
+    },
+    "hallucination": "statement in compressed not supported by full (expected 0 — extractive)"
+  },
+  "results": [
+    {"i": 1,  "q": "How does initial access work in 5G NR?",                 "brief": "equivalent", "normal": "equivalent", "halluc": 0, "note": "retrieval miss — F1AP references chunk; nothing useful to lose"},
+    {"i": 2,  "q": "What is the SSB structure in NR?",                       "brief": "minor_loss", "normal": "minor_loss", "halluc": 0, "note": "retrieval miss — key-derivation chunk; CD-SSB mention dropped"},
+    {"i": 3,  "q": "RACH preamble formats in 5G NR",                         "brief": "minor_loss", "normal": "minor_loss", "halluc": 0, "note": "drops Tx/Rx beam correspondence detail + preamble index structure"},
+    {"i": 4,  "q": "PDCP duplication in NR",                                 "brief": "equivalent", "normal": "equivalent", "halluc": 0, "note": "all 3 identical (2926 chars) — every sentence cleared threshold"},
+    {"i": 5,  "q": "BWP switching procedure in 5G",                          "brief": "equivalent", "normal": "equivalent", "halluc": 0, "note": "retrieval miss — MC service inter-system switching chunk"},
+    {"i": 6,  "q": "X.733 alarm reporting model in 3GPP",                    "brief": "equivalent", "normal": "equivalent", "halluc": 0, "note": "all 3 identical — references list chunk, retrieval miss"},
+    {"i": 7,  "q": "PRB usage measurement in 5G NR",                         "brief": "major_loss", "normal": "minor_loss", "halluc": 0, "note": "brief drops the PRB% formula + MAC/L1 reference point"},
+    {"i": 8,  "q": "NRCellDU information object class attributes",            "brief": "minor_loss", "normal": "minor_loss", "halluc": 0, "note": "drops DLBOFunction's NRCellDU-override note + AI/ML attrs"},
+    {"i": 9,  "q": "5G end-to-end KPI definition",                            "brief": "major_loss", "normal": "minor_loss", "halluc": 0, "note": "brief shows only A.18/A.20 headers; misses packet-delivery clauses + URLLC reliability"},
+    {"i": 10, "q": "Network slice subnet lifecycle management",               "brief": "major_loss", "normal": "equivalent", "halluc": 0, "note": "brief drops 4.11 substance (NSCE/KQI-KPI/resource allocation)"},
+    {"i": 11, "q": "What does the AMF do in 5G core?",                        "brief": "minor_loss", "normal": "minor_loss", "halluc": 0, "note": "drops Registration Reject + UE policy update procedure"},
+    {"i": 12, "q": "PDU session establishment procedure",                     "brief": "major_loss", "normal": "minor_loss", "halluc": 0, "note": "brief drops most NAS-message IE list + Request Type values"},
+    {"i": 13, "q": "SMF interactions with UPF over N4",                       "brief": "major_loss", "normal": "equivalent", "halluc": 0, "note": "brief drops N4 procedures overview + N4 Session ID concept"},
+    {"i": 14, "q": "5G AKA authentication procedure",                         "brief": "major_loss", "normal": "minor_loss", "halluc": 0, "note": "brief drops USIM CK/IK → KAUSF/KSEAF/KAMF derivation chain"},
+    {"i": 15, "q": "Key derivation hierarchy in 5G NAS",                      "brief": "major_loss", "normal": "minor_loss", "halluc": 0, "note": "brief misses horizontal/vertical KgNB* derivation + NCC behavior"},
+    {"i": 16, "q": "BGP-4 path attribute types",                              "brief": "major_loss", "normal": "major_loss", "halluc": 0, "note": "both miss attribute enumeration (NEXT_HOP, AS_PATH, ATOMIC_AGGREGATE, LOCAL_PREF, MULTI_EXIT_DISC, AGGREGATOR)"},
+    {"i": 17, "q": "BFD asynchronous mode operation",                         "brief": "minor_loss", "normal": "equivalent", "halluc": 0, "note": "brief misses Echo↔Async interaction"},
+    {"i": 18, "q": "ITU-T G.8032 ring protection switching",                  "brief": "minor_loss", "normal": "minor_loss", "halluc": 0, "note": "both miss 'two independent links/ring port' + 'never form loops' (FULL has those but also a useless abbrev dump)"},
+    {"i": 19, "q": "ETSI NFV MANO lifecycle operations",                      "brief": "major_loss", "normal": "major_loss", "halluc": 0, "note": "5 operations (Instantiate/Query/Scale/Check/Heal); brief got 1, normal got 2"},
+    {"i": 20, "q": "O-RAN fronthaul WG4 control plane",                       "brief": "major_loss", "normal": "major_loss", "halluc": 0, "note": "retrieval miss (returned WG2 R1, not WG4); only useful content was TOC, dropped to title+copyright"}
+  ],
+  "aggregate": {
+    "brief":  {"equivalent": 4, "minor_loss": 6, "major_loss": 10, "hallucinations": 0},
+    "normal": {"equivalent": 6, "minor_loss": 10, "major_loss": 4, "hallucinations": 0}
+  }
+}

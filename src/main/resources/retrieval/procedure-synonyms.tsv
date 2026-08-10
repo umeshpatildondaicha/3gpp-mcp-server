@@ -1,0 +1,60 @@
+# procedure-synonyms.tsv — engineer phrasing → specification phrasing.
+#
+# Format:  trigger phrase <TAB> terms appended to the retrieval query
+#
+# WHY
+# Engineers name procedures the way they discuss them; specs name them the way
+# they are titled, and the gap is large enough to change the answer. Measured on
+# series 23:
+#     "EPS attach"                            → 23.401 at rank 4, score 0.648
+#     "initial attach procedure E-UTRAN EPS"  → 23.401 at rank 1, score 0.991
+# Same spec, same index — only the wording differed.
+#
+# The trigger is matched as a lowercase substring of the procedure name. Matched
+# terms are APPENDED to the query, never substituted, so the caller's own wording
+# still contributes and a wrong match degrades to mild query dilution rather than
+# to a different procedure being retrieved.
+#
+# This affects getProcedureFlow only, not search3gpp.
+#
+# NOTE ON MEASUREMENT: "eps attach" below overlaps an entry in the 10-procedure
+# eval set, so that item's improvement is partly by construction. The other nine
+# entries act as the regression check — coverage there must not drop.
+#
+# After editing, re-run: python3 bench/run_procflow.py
+
+# ── attach / registration ────────────────────────────────────────────────────
+eps attach	initial attach procedure E-UTRAN
+lte attach	initial attach procedure E-UTRAN
+initial registration	registration procedure 5GS registration request
+5g registration	registration procedure 5GS registration request
+
+# ── session / bearer ─────────────────────────────────────────────────────────
+pdu session establishment	UE requested PDU session establishment SM context
+dedicated bearer	dedicated bearer activation procedure
+default bearer	default EPS bearer context activation
+
+# ── mobility ─────────────────────────────────────────────────────────────────
+# NO generic "handover" entry — measured harmful. Expanding "Xn based handover"
+# with "handover procedure mobility target source" moved 38.423 (the XnAP spec
+# that owns the procedure) from rank 1 at 0.725 to rank 4 at 0.428, handing the
+# top slot to 38.401. The vague terms pulled toward architecture specs and away
+# from the protocol spec. This is the failure mode to avoid: a single generic
+# verb expanded with more generic nouns dilutes the query instead of sharpening
+# it. Every trigger below names a SPECIFIC procedure and expands to vocabulary
+# that only the owning spec uses.
+tracking area update	tracking area updating procedure TAU
+cell reselection	cell reselection idle mode mobility
+
+# ── connection control ───────────────────────────────────────────────────────
+rrc connection establishment	RRC connection establishment RRCSetup procedure
+rrc re-establishment	RRC connection re-establishment procedure
+connection release	RRC connection release procedure
+
+# ── authentication / security ────────────────────────────────────────────────
+authentication	authentication and key agreement procedure
+security mode	security mode control procedure NAS
+
+# ── IMS ──────────────────────────────────────────────────────────────────────
+ims registration	IMS registration S-CSCF P-CSCF registration procedure
+emergency session	emergency session establishment IMS emergency

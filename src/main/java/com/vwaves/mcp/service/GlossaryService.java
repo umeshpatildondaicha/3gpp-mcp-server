@@ -16,14 +16,6 @@ import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Service;
 
-/**
- * Loads a TSV file of 3GPP abbreviations and expands them inside user queries
- * before retrieval. The vocabulary is configurable via app.glossary-path.
- *
- * Why: short acronyms like "PUCCH" or "SUCI" are tokenized poorly by general-
- * purpose embedders and rarely co-occur with their long form in spec text, so
- * appending the expansion lifts both dense and BM25 recall on telecom queries.
- */
 @Service
 public class GlossaryService {
     private static final Logger log = LoggerFactory.getLogger(GlossaryService.class);
@@ -80,7 +72,7 @@ public class GlossaryService {
                 if (parts.length != 2) {
                     continue;
                 }
-                String key = parts[0].strip().toUpperCase();
+                String key   = parts[0].strip().toUpperCase();
                 String value = parts[1].strip();
                 if (!key.isEmpty() && !value.isEmpty()) {
                     map.put(key, value);

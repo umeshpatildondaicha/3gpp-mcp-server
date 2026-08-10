@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3GPPilot vs. our 3GPP MCP — head-to-head scorecard</title>
+<style>
+  :root{
+    color-scheme: light;
+    --page:#f9f9f7; --surface:#fcfcfb; --surface-2:#f3f3ef;
+    --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --border:rgba(11,11,11,0.10);
+    --bar:#2a78d6; --bar-soft:#9ec5f4;
+    --ours:#0ca30c; --ours-ink:#006300;
+    --his:#ec835a; --his-ink:#b4531f;
+    --parity:#898781;
+    --crit:#d03b3b;
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --page:#0d0d0d; --surface:#1a1a19; --surface-2:#232322;
+    --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --border:rgba(255,255,255,0.10);
+    --bar:#3987e5; --bar-soft:#1c5cab;
+    --ours:#0ca30c; --ours-ink:#3fd23f;
+    --his:#ec835a; --his-ink:#f0a483;
+    --parity:#898781;
+    --crit:#e66767;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      color-scheme: dark;
+      --page:#0d0d0d; --surface:#1a1a19; --surface-2:#232322;
+      --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
+      --grid:#2c2c2a; --border:rgba(255,255,255,0.10);
+      --bar:#3987e5; --bar-soft:#1c5cab;
+      --ours:#0ca30c; --ours-ink:#3fd23f;
+      --his:#ec835a; --his-ink:#f0a483;
+      --parity:#898781;
+      --crit:#e66767;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--page); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+    line-height:1.5; padding:32px 20px 64px;
+  }
+  .wrap{max-width:960px; margin:0 auto}
+  header{display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap}
+  h1{font-size:26px; margin:0 0 4px; letter-spacing:-0.02em}
+  .sub{color:var(--ink-2); font-size:14px; margin:0}
+  .toggle{
+    border:1px solid var(--border); background:var(--surface); color:var(--ink-2);
+    border-radius:8px; padding:7px 12px; font-size:13px; cursor:pointer; font-family:inherit;
+  }
+  .toggle:hover{color:var(--ink)}
+  section{margin-top:34px}
+  h2{font-size:13px; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); margin:0 0 14px; font-weight:600}
+  .kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px}
+  .kpi{background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px}
+  .kpi .label{font-size:12px; color:var(--ink-2); margin-bottom:6px}
+  .kpi .val{font-size:30px; font-weight:650; letter-spacing:-0.02em}
+  .kpi .val small{font-size:15px; font-weight:500; color:var(--muted)}
+  .kpi .delta{font-size:12px; margin-top:4px; color:var(--ours-ink); font-weight:600}
+  .kpi.void .val{color:var(--muted); font-size:20px; font-weight:600}
+  .note{font-size:12.5px; color:var(--ink-2); margin:12px 2px 0}
+  /* bars */
+  .bars{background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px 18px 10px}
+  .row{display:grid; grid-template-columns:52px 1fr 74px; align-items:center; gap:12px; padding:5px 0}
+  .row .rl{font-size:13px; color:var(--ink-2); text-align:right; font-variant-numeric:tabular-nums}
+  .track{background:var(--surface-2); border-radius:5px; height:18px; position:relative; overflow:hidden}
+  .fill{height:100%; border-radius:5px; background:var(--bar)}
+  .fill.weak{background:var(--crit)}
+  .fill.mid{background:var(--bar-soft)}
+  .rv{font-size:12.5px; color:var(--ink-2); font-variant-numeric:tabular-nums}
+  .rv b{color:var(--ink)}
+  /* tables */
+  table{width:100%; border-collapse:collapse; font-size:13.5px; background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden}
+  th,td{text-align:left; padding:10px 12px; border-bottom:1px solid var(--grid); vertical-align:top}
+  th{font-size:11.5px; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); font-weight:600}
+  tr:last-child td{border-bottom:none}
+  td.dim{color:var(--ink); font-weight:600; white-space:nowrap}
+  td small{color:var(--ink-2)}
+  .badge{display:inline-block; font-size:11.5px; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap}
+  .b-ours{color:var(--ours-ink); background:color-mix(in srgb, var(--ours) 15%, transparent)}
+  .b-his{color:var(--his-ink); background:color-mix(in srgb, var(--his) 18%, transparent)}
+  .b-par{color:var(--parity); background:color-mix(in srgb, var(--parity) 16%, transparent)}
+  .tally{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px}
+  .tally .t{font-size:13px; padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:var(--surface)}
+  .tally .t b{font-size:15px}
+  ol.road{padding-left:20px; margin:0}
+  ol.road li{margin:9px 0; font-size:14px}
+  ol.road li b{letter-spacing:-0.01em}
+  .tag{font-size:11px; font-weight:700; padding:1px 7px; border-radius:6px; margin-left:6px}
+  .tag.hi{color:var(--ours-ink); background:color-mix(in srgb, var(--ours) 15%, transparent)}
+  .foot{margin-top:34px; font-size:12px; color:var(--muted); border-top:1px solid var(--grid); padding-top:14px}
+  .cap{font-size:12px;color:var(--muted);margin:8px 2px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>3GPPilot&nbsp;vs.&nbsp;our&nbsp;3GPP&nbsp;MCP&nbsp;server</h1>
+      <p class="sub">Head-to-head: TejVox&nbsp;3GPPilot (advertised capabilities) vs. our implementation (measured benchmark). Compiled 2026-07-27.</p>
+    </div>
+    <button class="toggle" id="tg">◐ Theme</button>
+  </header>
+
+  <p class="note" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
+    <b>Fairness caveat.</b> TejVox publishes <b>no benchmark numbers</b> — only advertised corpus scale and product screenshots, and he says "still testing." This is not a same-yardstick score race: we have <b>measured</b> retrieval quality; he has <b>advertised</b> capability. Every number below is ours and real; blanks mean no measured figure exists for either side.
+  </p>
+
+  <section>
+    <h2>Our measured retrieval quality (TejVox: no published data)</h2>
+    <div class="kpis">
+      <div class="kpi">
+        <div class="label">TOP-1 — broad 98-q set</div>
+        <div class="val">68.4%<small> &nbsp;67/98</small></div>
+        <div class="delta">▲ +3 vs baseline (64)</div>
+      </div>
+      <div class="kpi">
+        <div class="label">TOP-5 — broad 98-q set</div>
+        <div class="val">95.9%<small> &nbsp;94/98</small></div>
+        <div class="delta">▲ +2 vs baseline (92)</div>
+      </div>
+      <div class="kpi">
+        <div class="label">TOP-1 — focused OAM suite</div>
+        <div class="val">74%<small> &nbsp;37/50</small></div>
+      </div>
+      <div class="kpi">
+        <div class="label">TOP-5 — focused OAM suite</div>
+        <div class="val">98%<small> &nbsp;49/50</small></div>
+      </div>
+      <div class="kpi void">
+        <div class="label">TejVox — any published metric</div>
+        <div class="val">no data</div>
+      </div>
+    </div>
+    <p class="note">Scored by <code>bench/compare.py</code> on the 98 questions common to every run, against one corrected gold set — so the only thing that varies is the retriever.</p>
+  </section>
+
+  <section>
+    <h2>Our TOP-1 by topic (final run) — where the strength and the holes are</h2>
+    <div class="bars" id="bars"></div>
+    <p class="cap">Bar length = TOP-1 accuracy. <span style="color:var(--crit);font-weight:700">LTE (12%)</span> is the single worst topic and the clearest opportunity — 5 of its 8 golds already sit in the top-5, so it's losing on rank, not recall.</p>
+  </section>
+
+  <section>
+    <h2>Capability scorecard — who leads each dimension</h2>
+    <div class="tally">
+      <span class="t"><b style="color:var(--ours-ink)">8</b> &nbsp;Ours leads</span>
+      <span class="t"><b style="color:var(--parity)">2</b> &nbsp;Parity</span>
+      <span class="t"><b style="color:var(--his-ink)">6</b> &nbsp;TejVox leads</span>
+    </div>
+    <table>
+      <thead><tr><th>Dimension</th><th>TejVox 3GPPilot (advertised)</th><th>Our MCP (measured / actual)</th><th>Lead</th></tr></thead>
+      <tbody>
+        <tr><td class="dim">Retrieval quality</td><td><small>no data published</small></td><td><small>67/98 TOP-1 · 94/98 TOP-5 (measured)</small></td><td><span class="badge b-ours">▲ Ours</span></td></tr>
+        <tr><td class="dim">Lexical / BM25</td><td><small>"hybrid keyword"</small></td><td><small>FTS5, AND→AND-1→OR fallback, term-specificity sort</small></td><td><span class="badge b-ours">▲ Ours</span></td></tr>
+        <tr><td class="dim">Fusion</td><td><small>"RRF Fusion"</small></td><td><small>RRF k=60 + co-occurrence + TR/extras discounts + alias-pin</small></td><td><span class="badge b-ours">▲ Ours</span></td></tr>
+        <tr><td class="dim">Filter / diversity</td><td><small>"Filter"</small></td><td><small>per-spec cap, stub suppression, binary-text guard</small></td><td><span class="badge b-ours">▲ Ours</span></td></tr>
+        <tr><td class="dim">Answer shaping</td><td><small>"Specialized Selector"</small></td><td><small>sentence-level MMR, TOC/table shape detection, verbosity presets</small></td><td><span class="badge b-ours">▲ Ours</span></td></tr>
+        <tr><td class="dim">Eval rigor</td><td><small>none published</small></td><td><small>benchmark + verbosity + latency suites, saved A/B baselines</small></td><td><span class="badge b-ours">▲ Ours</span></td></tr>
+        <tr><td class="dim">Deployment / ops</td><td><small>closed SaaS</small></td><td><small>deterministic MCP, GPU-free, k8s-ready, model-parity fail-fast</small></td><td><span class="badge b-ours">▲ Ours</span></td></tr>
+        <tr><td class="dim">Dense retrieval</td><td><small>"hybrid semantic"</small></td><td><small>BGE-M3 1024-d, in-RAM cosine, per-spec cap</small></td><td><span class="badge b-par">= Parity</span></td></tr>
+        <tr><td class="dim">Rerank</td><td><small>cross-encoder</small></td><td><small>mxbai / bge cross-encoder, re-applies discounts</small></td><td><span class="badge b-par">= Parity</span></td></tr>
+        <tr><td class="dim">Intent routing</td><td><small>first-class "Intent Routing" stage</small></td><td><small>implicit (extras-weight + persona rules)</small></td><td><span class="badge b-his">▲ TejVox</span></td></tr>
+        <tr><td class="dim">Confidence gate + vector rescue</td><td><small>"Confidence Gate" + vector rescue</small></td><td><small>hard min-score floor only (our rescue experiment regressed −4)</small></td><td><span class="badge b-his">▲ TejVox</span></td></tr>
+        <tr><td class="dim">Self-validation</td><td><small>"Self-Validation" of answer vs evidence</small></td><td><small>none (left to external LLM)</small></td><td><span class="badge b-his">▲ TejVox</span></td></tr>
+        <tr><td class="dim">Cross-spec MSC synthesis</td><td><small>"Generate Procedure Flow" across specs</small></td><td><small>retrieves 8/9 cross-spec correctly, but returns chunks — no MSC</small></td><td><span class="badge b-his">▲ TejVox<br><small style="font-weight:500">presentation only</small></span></td></tr>
+        <tr><td class="dim">Release-aware ranking</td><td><small>release-aware answers</small></td><td><small>release column unused in RRF → <b style="color:var(--crit)">LTE 1/8</b></small></td><td><span class="badge b-his">▲ TejVox</span></td></tr>
+        <tr><td class="dim">Clause-level granularity</td><td><small>18,604 NR / 7,907 LTE / 13,562 Core clauses</small></td><td><small>400-word sliding windows</small></td><td><span class="badge b-his">▲ TejVox</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>His advantages, cross-referenced to our measured weak spots</h2>
+    <table>
+      <thead><tr><th>His advantage</th><th>Our measured symptom</th><th>Reading</th></tr></thead>
+      <tbody>
+        <tr><td class="dim">Release-aware ranking</td><td><small><b style="color:var(--crit)">LTE 1/8 TOP-1.</b> NR 38-series crowds out LTE 36-series (e.g. "LTE MAC random access" → 38.321 #1, 36.321 at #2). 5/8 golds in top-5.</small></td><td><small><b>Highest ROI.</b> Losing on rank, not recall. A release/tech-aware re-rank → LTE toward 5–6/8 ≈ <b>+4–5 TOP-1 overall</b>.</small></td></tr>
+        <tr><td class="dim">Cross-spec MSC synthesis</td><td><small><b style="color:var(--ours-ink)">cross-spec 8/9 — already strong.</b> We find the right specs; we just don't draw the MSC.</small></td><td><small>Reframes his "biggest gap": for us it's a <b>product/presentation</b> gap (add getProcedureFlow), not a retrieval gap.</small></td></tr>
+        <tr><td class="dim">Clause-level granularity</td><td><small><b>procedure 11/22 — weakest kind.</b> Window chunks blur clause boundaries.</small></td><td><small>Real, but a larger change (ingestion + schema). Medium-term.</small></td></tr>
+        <tr><td class="dim">Confidence gate + vector rescue</td><td><small>our rescue 0.45/0.85 experiment <b style="color:var(--crit)">regressed −4</b> (FM 6→3, PM 19→17), backed out.</small></td><td><small>Sound idea, threshold-sensitive — needs the secondary-check gate, not a naive threshold. Benchmark-testable.</small></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Priority roadmap (ordered by measured ROI)</h2>
+    <ol class="road">
+      <li><b>Release / technology-aware ranking</b> <span class="tag hi">~+4–5 TOP-1</span> — closes his release-awareness lead and fixes our worst topic (LTE 1/8).</li>
+      <li><b>Owning-spec tie-break</b> — recovers the 2 regressions from the last round (AMF-N2, NSSI), where a non-gold spec flipped to #1 while gold sat at rank 2.</li>
+      <li><b>Cross-spec procedure-flow tool</b> — his headline feature, but for us it's packaging (retrieval already 8/9): high product value, low retrieval risk.</li>
+      <li><b>Confidence gate + vector rescue — done carefully</b> — our data shows a naive threshold regresses; needs the secondary-check design, measured on the harness.</li>
+      <li><b>Clause-level chunking</b>, then <b>intent routing / self-validation</b> — larger or robustness-oriented; sequence after the above.</li>
+    </ol>
+  </section>
+
+  <p class="foot">
+    Sources: <code>docs/COMPETITIVE_ANALYSIS_TejVox_3GPPilot.md</code> (capability intel from public LinkedIn posts + product screenshots, 2026-07-27) · <code>bench/compare.py</code> over <code>baseline_100q.json</code> → <code>after_all_fixes.json</code> (measured retrieval). Bottom line: on everything measurable we lead and are the only side with a number; his genuine leads are the capability layer, and our benchmark says <b>release-aware ranking</b> is the first to chase.
+  </p>
+</div>
+
+<script>
+  // Per-topic TOP-1 (final "all fixes" run): [topic, hits, n]
+  var data = [
+    ["NAS",5,5],["IMS",2,2],["PM",19,21],["SEC",4,5],["MGMT",3,4],
+    ["FM",7,10],["5GC",8,12],["CM",9,14],["TOPO",3,5],["NR",6,12],["LTE",1,8]
+  ];
+  data.sort(function(a,b){return (b[1]/b[2])-(a[1]/a[2]);});
+  var el = document.getElementById("bars");
+  data.forEach(function(d){
+    var pct = d[1]/d[2]*100;
+    var cls = pct < 25 ? "weak" : (pct < 60 ? "mid" : "");
+    var row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML =
+      '<div class="rl">'+d[0]+'</div>'+
+      '<div class="track"><div class="fill '+cls+'" style="width:'+pct.toFixed(0)+'%"></div></div>'+
+      '<div class="rv"><b>'+d[1]+'/'+d[2]+'</b> '+pct.toFixed(0)+'%</div>';
+    el.appendChild(row);
+  });
+  // theme toggle
+  var root = document.documentElement, tg = document.getElementById("tg");
+  tg.addEventListener("click", function(){
+    var cur = root.getAttribute("data-theme");
+    var dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var isDark = cur === "dark" || (cur === "" && dark);
+    root.setAttribute("data-theme", isDark ? "light" : "dark");
+  });
+</script>
+</body>
+</html>

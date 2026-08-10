@@ -17,43 +17,84 @@ spec:
       containers:
         - name: 3gpp-mcp-server
           image: ghcr.io/umeshpatildondaicha/3gpp-mcp-server:latest
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 3000
           env:
             - name: PORT
               value: "3000"
             - name: SESSION_TTL_MS
               value: "1800000"
+            # Both KB DBs must be on a persistent volume — they total ~3.4 GB and
+            # are NOT shipped in the container image.
             - name: KB_DB_PATH
-              value: "/home/mcpuser/.3gpp-kb/3gpp.db"
+              value: "/var/lib/3gpp-kb/3gpp_certified.db"
+            - name: KB_DB_PATH2
+              value: "/var/lib/3gpp-kb/telecom_extras.db"
+            # Reranker model cache (lets restarts skip the HF download).
+            - name: HOME
+              value: "/var/lib/3gpp-kb/cache"
+            # Must match server.servlet.context-path (see application.properties).
+            - name: SERVER_SERVLET_CONTEXT_PATH
+              value: "/mcp-3gpp-service"
+          # Heap is bounded by the JVM's container-aware sizing
+          # (-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 in run.sh).
+          # 188K vectors × 1024 × 4 bytes = 772 MB resident plus model + reranker.
           resources:
             requests:
-              memory: "2Gi"
-              cpu: "500m"
+              # 500m was too low. A single search runs cosine over 196,811
+              # vectors and then an ONNX rerank; at half a core the pod is
+              # throttled hard enough under node contention that the actuator
+              # endpoint stops answering promptly, which is what tripped the
+              # liveness probe below. Request what the workload actually uses.
+              memory: "3Gi"
+              cpu: "1500m"
             limits:
-              memory: "6Gi"
-              cpu: "1000m"
-          # Liveness — restart pod if server crashes
+              memory: "8Gi"
+              cpu: "2000m"
+          # Spring Boot Actuator probes — paths come from
+          # management.endpoint.health.probes.enabled=true in application.properties.
+          #
+          # timeoutSeconds MUST be set. Kubernetes defaults it to 1 second, and a
+          # 1-second budget is not survivable here: during a search burst or a JVM
+          # GC pause the health endpoint can easily take longer, three misses in a
+          # row (90 s) get the container killed, and every MCP session lives in
+          # this process's memory — so the kill surfaces to every connected client
+          # as "MCP session with server terminated" while the pod itself looks
+          # perfectly healthy afterwards. That symptom is a restart, not a
+          # resource shortage; check `kubectl get pod` RESTARTS before anything else.
           livenessProbe:
             httpGet:
-              path: /health
-              port: 3000
-            initialDelaySeconds: 10
+              path: /mcp-3gpp-service/actuator/health/liveness
+              port: http
+            initialDelaySeconds: 60
             periodSeconds: 30
-            failureThreshold: 3
-          # Readiness — wait for DB + model load before sending traffic
+            timeoutSeconds: 10
+            failureThreshold: 5
           readinessProbe:
             httpGet:
-              path: /ready
-              port: 3000
+              path: /mcp-3gpp-service/actuator/health/readiness
+              port: http
+            # Readiness needs to wait for the 197K vectors to load (~17 s measured)
+            # and the reranker ONNX session warm-up. Allow up to 5 min for cold start.
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+          startupProbe:
+            httpGet:
+              path: /mcp-3gpp-service/actuator/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 10
             failureThreshold: 30
           volumeMounts:
-            - name: db-cache
-              mountPath: /home/mcpuser/.3gpp-kb
+            - name: kb-data
+              mountPath: /var/lib/3gpp-kb
       volumes:
-        - name: db-cache
+        - name: kb-data
           persistentVolumeClaim:
             claimName: 3gpp-db-pvc
 ---
@@ -66,4 +107,6 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 5Gi
+      # 3gpp_certified.db ≈ 3.3 GB, telecom_extras.db ≈ 37 MB, plus WAL files,
+      # plus ~1 GB for the reranker ONNX cache under $HOME/.cache/3gpp-mcp.
+      storage: 10Gi

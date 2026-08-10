@@ -1,0 +1,63 @@
+# spec-ownership.tsv — scope gate for the intent router.
+#
+# Format:  marker <TAB> owning_spec_id <TAB> human topic label
+#
+# WHAT THIS IS FOR
+# Retrieval scores cannot tell you that a question is unanswerable. Measured on
+# this corpus (2026-07-27), questions whose owning spec is ABSENT scored *higher*
+# than questions that were answered correctly — median top score 0.905 vs 0.780 —
+# because with no true owner competing, one loosely-related chunk wins uncontested.
+# So a threshold can never detect this. The server has to know what it is missing.
+#
+# When a marker below matches the query, ThreeGppToolService checks whether the
+# owning spec is actually indexed. If it is NOT, the search is short-circuited and
+# the caller is told which spec they need and to use WebSearch. If the spec IS
+# indexed, the marker is ignored entirely — so ingesting 29.244 automatically
+# disables the PFCP entries here with no code or config change.
+#
+# RULES FOR ADDING A MARKER
+# 1. Only add a marker when NO indexed spec could reasonably answer the question.
+#    Counter-example: do NOT gate "Nsmf_PDUSession" on 29.502 — 23.502 IS indexed
+#    and legitimately defines those service operations at stage 2.
+#    Counter-example: do NOT gate "s-cscf" on 24.229 — 23.228 IS indexed and
+#    covers IMS architecture including CSCF roles.
+# 2. Markers are matched case-insensitively on word boundaries, so "n4" will not
+#    match inside "n40" and "cdr" will not match inside "cdrom".
+# 3. Prefer multi-word markers; single short tokens are the main false-positive risk.
+# 4. After editing, re-run bench/run_bench.py. A marker that fires on an
+#    answerable question turns a correct result into a refusal — the worst
+#    possible regression. The current set was validated at 0 false positives
+#    across all 100 benchmark questions.
+
+# ── PFCP / N4 — TS 29.244 absent; nothing indexed covers the N4 protocol ──────
+pfcp	29.244	PFCP / N4 session management
+n4 session	29.244	PFCP / N4 session management
+sxa	29.244	Sxa/Sxb/Sxc (CUPS) session management
+sxb	29.244	Sxa/Sxb/Sxc (CUPS) session management
+
+# ── Charging — the entire 32.24x/32.29x charging family is absent ─────────────
+charging data record	32.298	Charging data record (CDR) encoding
+cdr	32.298	Charging data record (CDR) encoding
+offline charging	32.240	Charging architecture and principles
+online charging	32.240	Charging architecture and principles
+
+# ── IMS stage 3 — TS 24.229 absent. Only gate SIP-protocol-level markers;
+#    IMS architecture questions are answerable from 23.228 / 23.167 / 23.237. ──
+sip invite	24.229	IMS SIP call control (stage 3)
+sip method	24.229	IMS SIP call control (stage 3)
+sip response code	24.229	IMS SIP call control (stage 3)
+
+# ── GTP-U user plane — TS 29.281 absent (29.274 is GTPv2-C, control plane) ────
+gtp-u extension header	29.281	GTP-U user-plane protocol
+
+# ── Pseudowire / L2VPN — IETF, and none of the owning RFCs are indexed ────────
+# Added 2026-07-28. "VPN Pseudowire Down leading to Link Down" returned 23.060,
+# 23.007, 29.274 and 23.501 — 3GPP specs for a topic 3GPP does not cover (0
+# chunks mention pseudowire). RFC 2863 does explain how a lower sub-layer going
+# down propagates linkDown upward, which is the generic half of the answer, but
+# the PW-specific status mapping lives in RFCs we do not hold.
+pseudowire	RFC3985	Pseudowire emulation edge-to-edge (PWE3) architecture	note
+pseudo-wire	RFC3985	Pseudowire emulation edge-to-edge (PWE3) architecture	note
+pwe3	RFC3985	Pseudowire emulation edge-to-edge (PWE3) architecture	note
+pw status	RFC4447	Pseudowire setup and maintenance over LDP	note
+vccv	RFC5085	Pseudowire virtual circuit connectivity verification	note

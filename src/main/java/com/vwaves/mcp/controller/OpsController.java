@@ -2,6 +2,7 @@ package com.vwaves.mcp.controller;
 
 import com.vwaves.mcp.service.KbDataService;
 import com.vwaves.mcp.service.StartupState;
+import jakarta.servlet.http.HttpServletRequest;
 import java.time.Duration;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -21,13 +22,15 @@ public class OpsController {
     }
 
     @GetMapping("/")
-    public Map<String, Object> info() {
+    public Map<String, Object> info(HttpServletRequest request) {
+        String base = request.getContextPath();
         return Map.of(
                 "name", "3gpp-telecom-kb MCP Server",
                 "version", "2.0.0",
-                "mcp", "/mcp",
-                "health", "/health",
-                "ready", "/ready"
+                "mcp", base + "/mcp",
+                "health", base + "/health",
+                "ready", base + "/ready",
+                "actuator_health", base + "/actuator/health"
         );
     }
 

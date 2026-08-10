@@ -68,15 +68,18 @@ WORKDIR $SERVICE_PATH
 USER $USER_NAME
 
 # ============================================
-# Health check for Kubernetes
+# Health check for Kubernetes / Docker
 # ============================================
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:${MELODY_PORT:-8080}/health || exit 1
+# Spring Boot Actuator path (management.endpoint.health.probes.enabled=true).
+# PORT defaults to 3000 in application.properties; override at runtime via PORT or MELODY_PORT.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+    CMD wget -qO- http://localhost:${MELODY_PORT:-${PORT:-3000}}/actuator/health/liveness >/dev/null 2>&1 || exit 1
 
 # ============================================
 # Expose application port
 # ============================================
-EXPOSE 8080
+# Matches application.properties default (server.port=${MELODY_PORT:${PORT:3000}}).
+EXPOSE 3000
 
 # ============================================
 # Container startup command

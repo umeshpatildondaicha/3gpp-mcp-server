@@ -1,0 +1,99 @@
+    # AND-path token substitutions (TSV: original<TAB>canonical).
+# Lines beginning with '#' are ignored. Keys lower-cased.
+#
+# NOTE: the loader splits on the FIRST tab and takes the remainder verbatim as
+# the value — trailing comments are NOT stripped. Keep data lines as exactly
+# key<TAB>value; put all annotation on its own '#' line.
+#
+# Each entry maps a query token to the canonical 3GPP-spec vocabulary so the
+# AND query reaches the right chunks. Add an entry only when a regression query
+# proves the substitution is needed; do not speculatively expand this list.
+#
+# original	canonical
+volte	mmtel
+sgw	serving
+s-gw	serving
+pgw	pdn
+p-gw	pdn
+
+# ── Vendor CM attribute names → 3GPP RRC/NRM vocabulary ────────────────────
+# Bulk-CM audit payloads name attributes in the vendor MO model (camelCase, no
+# hyphens); 3GPP spells the same IEs with hyphens and different abbreviations.
+# Every key below was verified to return 0 FTS hits against 3gpp_certified.db,
+# and every value >0 — so these queries could not reach their spec clause at
+# all before the substitution. "0 → N" below is (vendor hits → canonical hits)
+# as measured 2026-07-27.
+
+# System information / SIB scheduling
+# siperiodicity 0 → 20 (36.331 SchedulingInfo)
+siperiodicity	si-periodicity
+
+# PRACH / random access
+# rootseqindex 0 → 23 (36.331 PRACH-ConfigSIB), prachindex 0 → 11,
+# preambletargetpower 0 → 11, maxnumpreamblece 0 → 6 (NB-IoT NPRACH)
+rootseqindex	rootsequenceindex
+prachindex	prach-configindex
+preambletargetpower	preambleinitialreceivedtargetpower
+maxnumpreamblece	maxnumpreambleattemptce
+
+# RLC
+# ul/dlmaxretxthreshold 0 → 14 (36.331 UL-AM-RLC), ultpollretransmit 0 → 15,
+# dlstatusreportsnenable 0 → 9
+ulmaxretxthreshold	maxretxthreshold
+dlmaxretxthreshold	maxretxthreshold
+ultpollretransmit	t-pollretransmit
+dlstatusreportsnenable	statusreportrequired
+
+# RRC / inactivity
+# uedatainactivitytimer 0 → 20, adaptiveue... 0 → 20.
+# rrcproceduretimeout 0 → 49: t300 is the closest 3GPP analogue (RRC
+# connection establishment timer), not an exact equivalent.
+uedatainactivitytimer	datainactivitytimer
+adaptiveuedatainactivitytimersupport	datainactivitytimer
+rrcproceduretimeout	t300
+
+# Cell identity / carrier
+# nbcellidentity 0 → 74, fddulearfcn 0 → 17, dlearfcn 0 → 20,
+# fddulprbindex 0 → 22 (NB-IoT UL PRB index), nbiotserviceenabled 0 → 2250
+nbcellidentity	cellidentity
+fddulearfcn	ul-carrierfreq
+dlearfcn	dl-carrierfreq
+fddulprbindex	prb-index
+nbiotserviceenabled	nb-iot
+
+# NB-IoT downlink gap (36.331 DL-GapConfig-NB) — 0 → 1 each
+dlgapperiodicity	dl-gapperiodicity
+dlgapdurcoeff	dl-gapdurationcoeff
+dlgapthreshold	dl-gapthreshold
+
+# Measurement events A1 / A2 / A3
+# a{1,2}*thresholdrsrp 0 → 16 (36.331 ThresholdEUTRA), a3*offset 0 → 19,
+# a3intertriggerquantity 0 → 5
+a1intera1thresholdrsrp	threshold-rsrp
+a1intersona1thresholdrsrp	threshold-rsrp
+a2intera2thresholdrsrp	threshold-rsrp
+a2intersona2thresholdrsrp	threshold-rsrp
+a3intera3offset	a3-offset
+a3intersona3offset	a3-offset
+a3intertriggerquantity	triggerquantity
+
+# EN-DC / PWS / scheduling request
+# endcsupport 0 → 2279, endcplmn 0 → 11 (SIB2 per-PLMN EN-DC flag),
+# emergencyareaids 0 → 5, lcsrprohibitenable 0 → 4
+endcsupport	en-dc
+endcplmn	upperlayerindication
+emergencyareaids	emergencyareaid
+lcsrprohibitenable	logicalchannelsr-prohibit
+
+# Deliberately NOT mapped — these vendor tokens already resolve in the corpus,
+# so substituting would lose recall rather than add it:
+#   tac (1008), pci (745), earfcn (334), severity (31),
+#   timealignmenttimer (107), modificationperiodcoeff (5),
+#   additionalspectrumemission (130)
+#
+# Deliberately NOT mapped — no 3GPP counterpart exists (vendor-proprietary
+# capacity, RET/AISG antenna, alarm and SON attributes). Queries on these
+# should fall through to the OUT_OF_SCOPE hint, not to a wrong spec clause:
+#   maxActiveUsers, maxDataBearers, pagingCodeRate, targetPucchSinr1a,
+#   mcimEnableState, radioSerialNum, basestationId, descr, name,
+#   mechTilt, rtsMechTilt, rtsAzimuth, retTilt, antennaBearing

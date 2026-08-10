@@ -5,3 +5,17 @@ target/
 .env.*
 *.tgz
 .DS_Store
+
+# local run logs (logback-spring.xml)
+logs/
+
+# knowledge-base SQLite files — 2GB+, live in SeaweedFS (buckets/performance/3gpp-models/3gpp_kb), never in git
+3gpp_kb/
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+nohup.out
+ui.zip
+.idea/
+bench/results/

@@ -1,0 +1,51 @@
+# chunking-rules.tsv — how a spec's text is cut into clause-level units.
+#
+# Read by BOTH the Python builder (3gpp embedings/build_clause_index.py) and the
+# Java service, so the rules exist in exactly one place. Nothing about chunking
+# is compiled in; adding a spec family with different conventions is a new row.
+#
+# ── WHY THE PATTERNS ARE NOT LINE-ANCHORED ───────────────────────────────────
+# Newlines did not survive ingestion: 0 of 200 sampled chunks in 36.331, 36.322,
+# 38.331 and 23.501 contain a single "\n". Every "^"-anchored rule would match
+# nothing. All patterns below are therefore INLINE and must carry their own
+# left-context guard.
+#
+# ── ROW TYPES ────────────────────────────────────────────────────────────────
+#   split <TAB> priority <TAB> name <TAB> regex
+#       A match STARTS a new unit. The unit runs to the next split point or to
+#       max_chars. Capture group 1, when present, names the unit (the IE name).
+#   marker <TAB> priority <TAB> name <TAB> regex
+#       Records a region label on units that fall inside it; does not itself cut.
+#   limit <TAB> - <TAB> key <TAB> value
+#
+# Lower priority number wins when two rules match at the same offset.
+#
+# ── LIMITS ───────────────────────────────────────────────────────────────────
+# max_chars is 1200 on purpose: the cross-encoder's window is ~1382 characters
+# (max-length 384 tokens). Measured before this change, 99% of chunks in the LTE
+# RAN specs exceeded that window, so their tail was invisible to reranking — the
+# permitted values of an IE sat past the cut and could never be scored. Staying
+# under the window removes that failure by construction rather than by tuning.
+
+# ── ASN.1 information-element definitions: the highest-value boundary ─────────
+# "maxRetxThreshold ENUMERATED {t1, t2, ... t32}" is what decides a compliance
+# question, and it is unambiguous inline. 36.331 contains 3754 of these, 38.331
+# 3575 — each becomes its own unit instead of one line inside a 3000-char block.
+split	10	ie_definition	\b([A-Za-z][A-Za-z0-9_-]{2,})\s*::=\s*(?:SEQUENCE|ENUMERATED|INTEGER|CHOICE|BIT\s+STRING|OCTET\s+STRING|BOOLEAN|NULL|REAL|IA5String|VisibleString)
+
+# ── ASN.1 region markers: label units, do not cut ─────────────────────────────
+marker	20	asn1_block	--\s*ASN1START\b
+marker	21	asn1_block_end	--\s*ASN1STOP\b
+marker	22	asn1_tag	--\s*TAG-([A-Z0-9_-]+)-START\b
+
+# ── Clause headings, for specs with no ASN.1 (36.322, 23.501, 28.552 ...) ─────
+# Inline and therefore risky: "see clause 5.2.1 Transmit operations" must NOT cut.
+# The negative lookbehind excludes the words that introduce a CROSS-REFERENCE
+# rather than a heading. Lower priority than ie_definition so an ASN.1 spec is
+# always cut on IEs first.
+split	40	clause_heading	(?<!clause )(?<!subclause )(?<!see )(?<!in )(?<!of )(?<!TS )\b(\d+(?:\.\d+){1,4}[A-Za-z]?)\s+([A-Z][A-Za-z][A-Za-z0-9 ,()/-]{4,70})(?=\s+[A-Z(])
+
+# ── Size limits ──────────────────────────────────────────────────────────────
+limit	-	min_chars	120
+limit	-	max_chars	1200
+limit	-	overlap_chars	60

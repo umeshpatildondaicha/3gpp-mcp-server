@@ -28,25 +28,54 @@ public class DbResolver {
     }
 
     public Path resolveDb() {
-        String dbPath = appProperties.hasLocalDbPath()
+        String configured = appProperties.hasLocalDbPath()
                 ? appProperties.kbDbPath()
-                : "classpath:3gpp.db";
+                : "classpath:3gpp_certified.db";
+        warnIfClasspathOverride(configured, "KB_DB_PATH", "classpath:3gpp_certified.db");
+        return resolve(configured, "classpath:3gpp_certified.db", "KB_DB_PATH", "primary");
+    }
 
+    public Path resolveDb2() {
+        String configured = appProperties.hasLocalDbPath2()
+                ? appProperties.kbDbPath2()
+                : "classpath:telecom_extras.db";
+        warnIfClasspathOverride(configured, "KB_DB_PATH2", "classpath:telecom_extras.db");
+        return resolve(configured, "classpath:telecom_extras.db", "KB_DB_PATH2", "extras");
+    }
+
+    /**
+     * Catch the common misconfiguration where someone overrides {@code KB_DB_PATH}
+     * to a {@code classpath:...} value. The classpath fallback only exists to host
+     * a tiny fixture for unit tests; for real deployments the value must be a
+     * filesystem path. Loud warning at startup so it shows up before the
+     * downstream "DB not found" failure.
+     */
+    private void warnIfClasspathOverride(String configured, String envVar, String defaultClasspath) {
+        if (configured == null) return;
+        if (!configured.startsWith("classpath:")) return;
+        if (configured.equals(defaultClasspath)) return; // unset / using default — fine
+        log.warn("{} is set to '{}', a classpath: value. Classpath DBs are not packed in production builds; " +
+                        "this will fail at startup. Set {} to an absolute filesystem path " +
+                        "(e.g. /var/lib/3gpp-kb/3gpp_certified.db).",
+                envVar, configured, envVar);
+    }
+
+    private Path resolve(String dbPath, String fallbackClasspath, String envVar, String label) {
         if (dbPath.startsWith("classpath:")) {
-            return resolveClasspathDb(dbPath);
+            return resolveClasspathDb(dbPath, envVar, label);
         }
-
         Path localPath = Path.of(dbPath);
         if (Files.exists(localPath) && isValidKbDb(localPath)) {
             log.info("using local DB: {}", localPath);
             return localPath;
         }
-
-        // Configured filesystem path is missing or unusable — fall back to bundled
-        // classpath DB so a stale KB_DB_PATH env var or broken sidecar file can't
-        // crash the pod. The DB ships inside the JAR via classpath:3gpp.db.
-        log.warn("Configured DB path {} not usable; falling back to classpath:3gpp.db", localPath);
-        return resolveClasspathDb("classpath:3gpp.db");
+        if (!Files.exists(localPath)) {
+            log.warn("DB at {} (env {}) does not exist; falling back to classpath", localPath, envVar);
+        } else {
+            log.warn("DB at {} (env {}) failed validation (no 'chunks' table); falling back to classpath",
+                    localPath, envVar);
+        }
+        return resolveClasspathDb(fallbackClasspath, envVar, label);
     }
 
     private boolean isValidKbDb(Path path) {
@@ -60,11 +89,19 @@ public class DbResolver {
         }
     }
 
-    private Path resolveClasspathDb(String classpathLocation) {
+    private Path resolveClasspathDb(String classpathLocation, String envVar, String label) {
         try {
             Resource resource = resourceLoader.getResource(classpathLocation);
             if (!resource.exists()) {
-                throw new IllegalStateException("Classpath DB resource not found: " + classpathLocation);
+                throw new IllegalStateException(String.format(
+                        "%s knowledge-base DB not found.%n" +
+                        "  Tried classpath fallback: %s (not packed in the JAR — DBs are too large)%n" +
+                        "  Set the env var %s to an absolute path of a valid SQLite DB " +
+                        "containing a 'chunks' table.%n" +
+                        "  Example:%n    export %s=/var/lib/3gpp-kb/%s%n" +
+                        "  See README.production.md for full deployment instructions.",
+                        label, classpathLocation, envVar, envVar,
+                        envVar.equals("KB_DB_PATH") ? "3gpp_certified.db" : "telecom_extras.db"));
             }
             // If it's a plain file (dev/exploded), use it directly
             try {
@@ -84,7 +121,7 @@ public class DbResolver {
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to resolve classpath DB: " + classpathLocation, e);
+            throw new IllegalStateException("Failed to resolve " + label + " DB at " + classpathLocation, e);
         }
     }
 }

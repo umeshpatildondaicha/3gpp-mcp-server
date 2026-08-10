@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3GPP MCP — local test console</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#161a21; --panel2:#1c212a; --line:#272d38;
+    --fg:#e6e9ef; --dim:#9aa4b5; --accent:#5b9dff; --ok:#4ec9a0;
+    --warn:#e5b567; --bad:#e5786d; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --panel2:#f0f2f5; --line:#dfe3ea;
+            --fg:#161a21; --dim:#5c6675; --accent:#1f6feb; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.2px; }
+  .badge { font:11px var(--mono); padding:2px 8px; border-radius:99px;
+           border:1px solid var(--line); color:var(--dim); }
+  .badge.up { color:var(--ok); border-color:var(--ok); }
+  .badge.down { color:var(--bad); border-color:var(--bad); }
+  main { display:grid; grid-template-columns:360px 1fr; gap:0; min-height:calc(100vh - 56px); }
+  @media (max-width:900px) { main { grid-template-columns:1fr; } }
+  aside { border-right:1px solid var(--line); padding:18px 20px; }
+  section { padding:18px 24px; min-width:0; }
+  label { display:block; font-size:11px; text-transform:uppercase; letter-spacing:.6px;
+          color:var(--dim); margin:14px 0 5px; }
+  input, select, textarea, button {
+    width:100%; font:inherit; color:var(--fg); background:var(--panel);
+    border:1px solid var(--line); border-radius:7px; padding:8px 10px; }
+  textarea { min-height:82px; resize:vertical; font:inherit; }
+  input:focus, textarea:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff;
+                   font-weight:600; cursor:pointer; margin-top:16px; padding:10px; }
+  button.primary:disabled { opacity:.5; cursor:not-allowed; }
+  button.ghost { background:transparent; cursor:pointer; margin-top:8px; color:var(--dim); }
+  .hint { font-size:11px; color:var(--dim); margin-top:6px; line-height:1.45; }
+  .samples { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .samples button { width:auto; font-size:11px; padding:4px 9px; background:var(--panel2);
+                    cursor:pointer; color:var(--dim); }
+  .samples button:hover { color:var(--fg); border-color:var(--accent); }
+  .stat { display:flex; gap:16px; flex-wrap:wrap; font:11px var(--mono);
+          color:var(--dim); margin-bottom:14px; }
+  .answer { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--accent);
+            border-radius:8px; padding:16px 18px; margin-bottom:22px; white-space:pre-wrap; }
+  .answer h2 { font-size:12px; text-transform:uppercase; letter-spacing:.6px;
+               color:var(--accent); margin:0 0 10px; }
+  .err { border-left-color:var(--bad); }
+  .err h2 { color:var(--bad); }
+  .hit { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+         padding:13px 15px; margin-bottom:10px; }
+  .hit-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .hit-n { font:11px var(--mono); color:var(--dim); }
+  .hit-spec { font:600 14px var(--mono); color:var(--accent); }
+  .hit-score { margin-left:auto; font:11px var(--mono); color:var(--dim); }
+  .hit-title { color:var(--dim); font-size:12px; margin:4px 0 8px; }
+  .hit-body { font-size:13px; }
+  .toolbox { margin-top:18px; border-top:1px solid var(--line); padding-top:12px; }
+  .toolbox-head { display:flex; justify-content:space-between; align-items:center;
+    font:600 11px var(--mono); text-transform:uppercase; letter-spacing:.06em;
+    color:var(--dim); margin-bottom:8px; }
+  .linky { width:auto; background:none; border:none; padding:0; color:var(--accent);
+    font:inherit; text-transform:none; letter-spacing:0; cursor:pointer; }
+  .tool { background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+    padding:6px 8px; margin-bottom:5px; }
+  .tool-name { font:600 11px var(--mono); color:var(--fg); }
+  .tool-desc { font-size:11px; color:var(--dim); margin-top:2px; line-height:1.35; }
+  .tool-params { font:10px var(--mono); color:var(--dim); margin-top:4px;
+    word-break:break-all; }
+  .tool-args { font:11px var(--mono); color:var(--accent); padding:4px 12px;
+    word-break:break-all; }
+  .err-inline { color:var(--warn); }
+  .tabs { display:flex; gap:4px; margin-bottom:14px; border-bottom:1px solid var(--line); }
+  .tabs button { width:auto; background:transparent; border:none; border-bottom:2px solid transparent;
+                 border-radius:0; color:var(--dim); cursor:pointer; padding:7px 12px; font-size:13px; }
+  .tabs button[aria-selected="true"] { color:var(--fg); border-bottom-color:var(--accent); }
+  pre.raw { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+            padding:14px; overflow-x:auto; font:12px/1.5 var(--mono); white-space:pre-wrap; }
+  .empty { color:var(--dim); padding:40px 0; text-align:center; }
+  .layer { margin-bottom:18px; }
+  .layer-head { font:600 12px var(--mono); color:var(--fg); background:var(--panel2);
+                border:1px solid var(--line); border-radius:6px; padding:7px 11px; margin-bottom:8px; }
+  .layer-head .sr { color:var(--dim); font-weight:400; }
+  .missing { border-left:3px solid var(--warn); background:var(--panel);
+             border:1px solid var(--line); border-radius:8px; padding:12px 15px; margin-bottom:18px; }
+  .missing h3 { margin:0 0 6px; font-size:12px; text-transform:uppercase;
+                letter-spacing:.6px; color:var(--warn); }
+  .param { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+           padding:11px 14px; margin-bottom:9px; }
+  .param-head { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .param-name { font:600 13px var(--mono); color:var(--accent); }
+  .vals { font:11px var(--mono); color:var(--dim); }
+  .vals b { color:var(--fg); font-weight:600; }
+  .conf { margin-left:auto; font:10px var(--mono); padding:1px 7px; border-radius:99px;
+          border:1px solid var(--line); color:var(--dim); }
+  .conf.none { color:var(--bad); border-color:var(--bad); }
+  .conf.high { color:var(--ok); border-color:var(--ok); }
+  .pquery { font:11px var(--mono); color:var(--dim); margin:5px 0 6px; }
+  .pspecs { font:12px var(--mono); }
+  .spin { display:inline-block; width:11px; height:11px; border:2px solid var(--line);
+          border-top-color:var(--accent); border-radius:50%; animation:sp .7s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>3GPP MCP — local test console</h1>
+  <span class="badge" id="health">checking…</span>
+  <span class="badge" id="kbinfo"></span>
+</header>
+
+<main>
+  <aside>
+    <label for="q" id="qlabel">Ask anything, or paste a document</label>
+    <textarea id="q" rows="6" placeholder="A question, a procedure name, or a whole Bulk-CM payload — it works out what to do."></textarea>
+
+    <label for="provider">LLM provider</label>
+    <select id="provider">
+      <option value="auto">auto-detect from key</option>
+      <option value="xai">xAI — Grok (xai-…)</option>
+      <option value="groq">Groq (gsk_…)</option>
+      <option value="openai">OpenAI (sk-…)</option>
+    </select>
+
+    <label for="key">API key</label>
+    <input id="key" type="password" placeholder="xai-… / gsk_… / sk-…"
+           autocomplete="off" spellcheck="false">
+    <div class="hint">Stored only in this browser's localStorage and sent to the
+      local proxy on 127.0.0.1. Leave blank to use the server's LLM_API_KEY.
+      Note: <b>Grok</b> (xAI, <code>xai-</code>) and <b>Groq</b>
+      (<code>gsk_</code>) are different services.</div>
+
+    <label for="model">Model</label>
+    <input id="model" placeholder="blank = provider default"
+           autocomplete="off" spellcheck="false">
+
+    <button class="primary" id="ask">Ask</button>
+    <button class="ghost" id="agent">Ask with tools (agent)</button>
+    <button class="ghost" id="search">Show evidence only</button>
+    <button class="ghost" id="validate" hidden>Validate the answer's citations</button>
+
+    <div class="toolbox">
+      <div class="toolbox-head">
+        <span>MCP tools <span class="badge" id="toolcount">…</span></span>
+        <button class="linky" id="toolrefresh" type="button">refresh</button>
+      </div>
+      <div id="tools" class="hint">loading…</div>
+      <div class="hint">Loaded from <code id="toolsrc">/mcp</code>. In agent mode
+        the model is given these and picks which to call.</div>
+    </div>
+  </aside>
+
+  <section>
+    <div class="stat" id="stat"></div>
+    <div id="answer"></div>
+    <div class="tabs">
+      <button id="tab-hits" aria-selected="true">Evidence</button>
+      <button id="tab-trace" aria-selected="false">Tool calls</button>
+      <button id="tab-raw" aria-selected="false">Raw MCP output</button>
+    </div>
+    <div id="hits"><div class="empty">Ask a question to see retrieved spec chunks.</div></div>
+    <div id="trace" hidden><div class="empty">Agent mode records each tool call here.</div></div>
+    <pre class="raw" id="raw" hidden></pre>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+// Restore key + model + provider from localStorage.
+$("key").value = localStorage.getItem("llmKey") || "";
+$("model").value = localStorage.getItem("llmModel") || "";
+$("provider").value = localStorage.getItem("llmProvider") || "auto";
+$("key").oninput = () => localStorage.setItem("llmKey", $("key").value);
+$("model").oninput = () => localStorage.setItem("llmModel", $("model").value);
+$("provider").oninput = () => localStorage.setItem("llmProvider", $("provider").value);
+
+// Tabs
+const TABS = ["hits", "trace", "raw"];
+function selectTab(which) {
+  TABS.forEach(t => {
+    $("tab-" + t).setAttribute("aria-selected", t === which);
+    $(t).hidden = t !== which;
+  });
+}
+TABS.forEach(t => { $("tab-" + t).onclick = () => selectTab(t); });
+
+// MCP tools. The server is the source of truth — nothing is enumerated here, so
+// adding a @Tool on the Java side makes it appear after a refresh.
+function renderTools(d) {
+  const tools = d.tools || [];
+  $("toolcount").textContent = tools.length;
+  $("toolsrc").textContent = d.mcp || "/mcp";
+  if (d.error) { $("tools").innerHTML = `<div class="err-inline">${esc(d.error)}</div>`; return; }
+  if (!tools.length) { $("tools").innerHTML = "no tools returned"; return; }
+  $("tools").innerHTML = tools.map(t => {
+    // First line only: search3gpp's description is ~50 lines of routing guidance
+    // written for the model, not for this panel. Full text is the hover title.
+    const first = (t.description || "").split("\n")[0];
+    const params = (t.parameters || []).map(p =>
+      (t.required || []).includes(p) ? `<b>${esc(p)}</b>` : esc(p)).join(", ");
+    return `<div class="tool" title="${esc(t.description || "")}">
+      <div class="tool-name">${esc(t.name)}</div>
+      <div class="tool-desc">${esc(first)}</div>
+      ${params ? `<div class="tool-params">${params}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+function loadTools(refresh) {
+  $("tools").innerHTML = "loading…";
+  fetch("/api/tools" + (refresh ? "?refresh=1" : ""))
+    .then(r => r.json()).then(renderTools)
+    .catch(e => { $("tools").innerHTML = `<div class="err-inline">${esc(String(e))}</div>`; });
+}
+$("toolrefresh").onclick = () => loadTools(true);
+loadTools(false);
+
+function renderTrace(trace) {
+  if (!trace || !trace.length) {
+    $("trace").innerHTML = '<div class="empty">No tool calls — the model answered directly.</div>';
+    return;
+  }
+  $("trace").innerHTML = trace.map(s => `
+    <div class="hit">
+      <div class="hit-head">
+        <span class="hit-spec">${esc(s.tool)}</span>
+        <span class="hit-n">step ${s.step} · ${s.ms} ms · ${s.chars} chars</span>
+        ${s.error ? `<span class="hit-score err-inline">error</span>` : ""}
+      </div>
+      <div class="tool-args">${esc(JSON.stringify(s.arguments))}</div>
+      <div class="hit-body">${esc((s.result || "").slice(0, 1200))}</div>
+    </div>`).join("");
+}
+
+// Health
+fetch("/api/health").then(r => r.json()).then(d => {
+  const el = $("health");
+  el.textContent = d.ok ? "MCP up" : "MCP down";
+  el.className = "badge " + (d.ok ? "up" : "down");
+  if (d.ok && d.stats) {
+    const chunks = (d.stats.match(/Total chunks\s*:\s*([\d,]+)/) || [])[1];
+    const specs  = (d.stats.match(/Unique specs\s*:\s*(\d+)/) || [])[1];
+    if (chunks) $("kbinfo").textContent = `${chunks} chunks · ${specs} specs`;
+  }
+}).catch(() => {
+  $("health").textContent = "proxy error";
+  $("health").className = "badge down";
+});
+
+function payload() {
+  return {
+    query: $("q").value.trim(),
+    apiKey: $("key").value.trim(),
+    model: $("model").value.trim(),
+    provider: $("provider").value,
+  };
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function renderIe(d) {
+  if (!d.found || !d.definitions.length) {
+    $("hits").innerHTML = `<div class="missing"><h3>Not defined in the indexed specs</h3>` +
+      `No ASN.1 definition for <b>${esc(d.ie)}</b>. Either the spec spells it ` +
+      `differently, or it is a vendor/hardware attribute 3GPP does not define — ` +
+      `which is a correct answer, not a failure.</div>`;
+    return;
+  }
+  $("hits").innerHTML = d.definitions.map(x => `
+    <div class="param">
+      <div class="param-head">
+        <span class="param-name">${esc(x.ie_name)}</span>
+        <span class="vals">${esc(x.spec_id)} · ${esc(x.release)}</span>
+      </div>
+      <div class="pspecs" style="margin-top:6px">${esc(x.definition)}</div>
+    </div>`).join("") +
+    `<div class="hint">Several release variants may differ (-r13 NB-IoT vs -r14 MBMS).
+     Pick by the managed object, do not merge them.</div>`;
+}
+
+function renderParams(d) {
+  let html = "";
+  if (d.auto_routed) {
+    html += `<div class="answer"><h2>Bulk-CM payload detected</h2>` +
+      `Recognised the payload and ran the per-parameter audit automatically — ` +
+      `the document itself was never sent to the server. ` +
+      `Each parameter below got its own short, spec-scoped query.</div>`;
+  }
+  if (!d.results || !d.results.length) {
+    $("hits").innerHTML = `<div class="missing"><h3>Nothing extracted</h3>` +
+      `The document was recognised but no parameters came back` +
+      (d.plan_error ? ` — ${esc(d.plan_error)}` : "") +
+      `. Nothing was sent to the server.</div>`;
+    return;
+  }
+  html += `<div class="missing"><h3>Audit scope</h3>` +
+    `${d.total_parameters} entries · ${d.unique_parameters} unique · ` +
+    `<b>${d.queried} queried</b>` +
+    (d.planned_out ? ` · ${d.planned_out} not 3GPP (skipped by planner)` : "") +
+    (d.plan_error ? ` · <span style="color:var(--warn)">planner: ${esc(d.plan_error)}</span>` : "") +
+    (d.skipped ? ` · <b>${d.skipped} skipped</b> (raise "Max parameters")` : "") +
+    (d.series ? ` · scoped to series ${d.series} (${esc(d.technology || "")})` : "") +
+    `</div>`;
+  html += (d.results || []).map(r => r.skipped ? `
+    <div class="param" style="opacity:.55">
+      <div class="param-head">
+        <span class="param-name">${esc(r.parameter || "")}</span>
+        <span class="vals">golden <b>${esc(r.goldenValue ?? "")}</b> ·
+          current <b>${esc(r.currentValue ?? "")}</b></span>
+        <span class="conf">not queried</span>
+      </div>
+      <div class="pquery">skipped by the planner — ${esc(r.skip_reason || "")}</div>
+    </div>` : `
+    <div class="param">
+      <div class="param-head">
+        <span class="param-name">${esc(r.parameter || "")}</span>
+        <span class="vals">golden <b>${esc(r.goldenValue ?? "")}</b> ·
+          current <b>${esc(r.currentValue ?? "")}</b>${r.moContext ? " · " + esc(r.moContext) : ""}</span>
+        <span class="conf ${esc(r.confidence)}">${esc(r.confidence)}</span>
+      </div>
+      <div class="pquery">query: ${esc(r.query || "")}</div>
+      <div class="pspecs">${
+        r.param_present === false
+          ? '<span style="color:var(--bad)">parameter not found in any retrieved spec text — likely not 3GPP-defined</span>'
+          : (r.hits || []).map(h => `${esc(h.spec_id)} <span class="hit-n">(${h.score})</span>`).join(" · ")
+              || "<span class=\"hit-n\">no hits</span>"
+      }</div>
+    </div>`).join("");
+  $("hits").innerHTML = html;
+}
+
+function renderLayers(layers, empty) {
+  let html = "";
+  if (empty && empty.length) {
+    html += `<div class="missing"><h3>No strong evidence in</h3>` +
+      empty.map(e => esc(e)).join("<br>") +
+      `<div class="hint">The flow is incomplete for these legs. Say so rather than ` +
+      `inferring them — that is what the abstention is for.</div></div>`;
+  }
+  if (!layers || !layers.length) {
+    $("hits").innerHTML = html || '<div class="empty">No layers returned.</div>';
+    return;
+  }
+  html += layers.map(l => `
+    <div class="layer">
+      <div class="layer-head">${esc(l.label)} <span class="sr">· series ${esc(l.series)}</span></div>
+      ${l.hits.map(h => `
+        <div class="hit">
+          <div class="hit-head">
+            <span class="hit-spec">${esc(h.spec_id)}</span>
+            <span class="hit-n">${esc(h.release)} · chunk ${h.chunk}</span>
+            <span class="hit-score">score ${h.score}</span>
+          </div>
+          <div class="hit-body">${esc(h.text)}</div>
+        </div>`).join("")}
+    </div>`).join("");
+  $("hits").innerHTML = html;
+}
+
+function renderHits(hits) {
+  if (!hits || !hits.length) {
+    $("hits").innerHTML = '<div class="empty">No results.</div>';
+    return;
+  }
+  $("hits").innerHTML = hits.map(h => `
+    <div class="hit">
+      <div class="hit-head">
+        <span class="hit-n">[${h.n}]</span>
+        <span class="hit-spec">${esc(h.spec_id)}</span>
+        <span class="hit-n">${esc(h.release || "")}</span>
+        <span class="hit-score">score ${h.score}</span>
+      </div>
+      <div class="hit-title">${esc(h.title || "")}${h.series ? " · " + esc(h.series) : ""}</div>
+      <div class="hit-body">${esc(h.excerpt || "")}</div>
+    </div>`).join("");
+}
+
+async function run(endpoint) {
+  const body = payload();
+  if (!body.query) { $("q").focus(); return; }
+  $("ask").disabled = $("search").disabled = $("agent").disabled = true;
+  $("stat").innerHTML = '<span class="spin"></span> running…';
+  $("answer").innerHTML = "";
+  $("hits").innerHTML = '<div class="empty">retrieving…</div>';
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (d.error) {
+      $("answer").innerHTML =
+        `<div class="answer err"><h2>Error</h2>${esc(d.error)}</div>`;
+      $("hits").innerHTML = '<div class="empty">—</div>';
+      $("stat").textContent = "";
+      return;
+    }
+    const nEvidence = d.queried !== undefined
+      ? d.queried
+      : d.layers ? d.layers.reduce((a, l) => a + l.hits.length, 0)
+      : (d.hits || []).length;
+    const bits = [`retrieval ${d.retrieval_ms} ms`, `${d.queried !== undefined ? nEvidence + " parameters" : nEvidence + " chunks"}`];
+    if (d.layers) bits.push(`${d.layers.length} layers`);
+    if (d.answer_ms) bits.push(`llm ${d.answer_ms} ms`);
+    if (d.provider) bits.push(`${d.provider}/${d.model}`);
+    $("stat").textContent = bits.join("   ·   ");
+
+    let html = "";
+    if (d.coverage) {
+      html += `<div class="missing"><h3>Coverage</h3>${esc(d.coverage)}</div>`;
+    }
+    if (d.unwrapped) {
+      html += `<div class="missing"><h3>Unwrapped request envelope</h3>` +
+        `That looked like a pasted tool-call, so the inner query was used: ` +
+        `<b>${esc(d.effective_query || "")}</b></div>`;
+    }
+    if (d.ignored_filters && d.ignored_filters.length) {
+      html += `<div class="answer err"><h2>Ignored filter${d.ignored_filters.length > 1 ? "s" : ""}</h2>` +
+        `${esc(d.ignored_filters.join(", "))} — not a valid value, so it was dropped ` +
+        `rather than silently returning nothing. Clear the field to remove this notice.</div>`;
+    }
+    if (d.answer) {
+      html += `<div class="answer"><h2>${d.queried !== undefined ? "Compliance report" : d.layers ? "Assembled call flow" : "Grounded answer"}</h2>${esc(d.answer)}</div>`;
+    } else if (d.answer_error) {
+      html += `<div class="answer err"><h2>LLM step skipped</h2>${esc(d.answer_error)}</div>`;
+    }
+    $("answer").innerHTML = html;
+    if (d.definitions && d.ie !== undefined) renderIe(d);
+    else if (d.results && d.queried !== undefined) renderParams(d);
+    else if (d.layers) renderLayers(d.layers, d.empty_layers);
+    else renderHits(d.hits);
+    lastAnswer = d.answer || ""; lastQuery = body.query;
+    $("validate").hidden = !d.answer;
+    $("raw").textContent = d.raw || "";
+    renderTrace(d.trace);
+    // Land on the tool calls when the model drove them — that is the thing
+    // worth seeing in agent mode; the evidence is a click away either way.
+    selectTab(d.trace && d.trace.length ? "trace" : "hits");
+  } catch (e) {
+    $("answer").innerHTML =
+      `<div class="answer err"><h2>Request failed</h2>${esc(e.message)}</div>`;
+    $("stat").textContent = "";
+  } finally {
+    $("ask").disabled = $("search").disabled = $("agent").disabled = false;
+  }
+}
+
+$("ask").onclick = () => run("/api/ask");
+$("agent").onclick = () => run("/api/agent");
+$("search").onclick = () => run("/api/search");
+
+let lastAnswer = "", lastQuery = "";
+$("validate").onclick = async () => {
+  $("validate").disabled = true;
+  try {
+    const res = await fetch("/api/validate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: lastQuery, draft: lastAnswer }),
+    });
+    const d = await res.json();
+    $("answer").innerHTML +=
+      `<div class="answer"><h2>Citation check</h2>${esc(d.raw || d.error)}</div>`;
+  } finally { $("validate").disabled = false; }
+};
+$("q").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run("/api/ask");
+});
+</script>
+</body>
+</html>

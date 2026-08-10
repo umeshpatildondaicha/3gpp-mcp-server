@@ -1,0 +1,82 @@
+# intent-exemplars.tsv — labelled phrasings for the embedding intent classifier.
+#
+# Format:  intent <TAB> exemplar phrasing
+# Valid intents: procedure | troubleshooting | clause_lookup | out_of_scope
+#
+# WHY THIS EXISTS
+# The original classifier was keyword substring matching. Measured on a held-out
+# set of 12 engineer-style paraphrases containing no trigger keywords, it scored
+# 5/12 (41%) — and 7 of the 12 collapsed to clause_lookup, the default, because
+# no term matched. "walk me through how the UE comes back after losing the cell"
+# is plainly a procedure question and hit nothing.
+#
+# These exemplars are embedded once at startup with the BGE-M3 model already
+# loaded for retrieval (no extra model, no network call). A query is classified
+# by cosine similarity to its nearest exemplar, which generalises to paraphrases
+# the keyword list will never enumerate.
+#
+# GUIDANCE FOR EDITING
+# - Vary the phrasing deliberately: formal spec language, casual engineer speak,
+#   and operational/field phrasing all appear for each intent. Similar exemplars
+#   add cost without adding recall.
+# - Do NOT paste in the held-out evaluation phrases. Tuning exemplars against the
+#   eval set makes the measured accuracy meaningless.
+# - After editing, re-run the intent eval AND bench/run_bench.py.
+
+# ── procedure: the answer is a sequence of steps across network functions ─────
+procedure	explain the call flow for attaching to the network
+procedure	what are the steps involved in setting up a session
+procedure	describe the signalling exchange between the UE and the core
+procedure	how does the handover sequence work
+procedure	give me the message sequence for authentication
+procedure	which messages are exchanged and in what order
+procedure	what happens first, second and third when a device connects
+procedure	end to end flow of a subscriber getting service
+procedure	how does the device reconnect after the radio link fails
+procedure	trace the path of a request from the handset to the gateway
+procedure	how do the network elements interact during mobility
+procedure	the sequence of events when a bearer is created
+procedure	how is a connection re-established after it is lost
+procedure	what does the network do when a terminal returns to coverage
+procedure	how does a user get an IP address and start passing traffic
+
+# ── troubleshooting: a symptom, a failure, or a reason code ───────────────────
+troubleshooting	why would registration be rejected
+troubleshooting	what causes a session to fail
+troubleshooting	the connection keeps dropping, what is going wrong
+troubleshooting	which cause code indicates the subscriber is barred
+troubleshooting	users are unable to connect, what should I check
+troubleshooting	what does the network send when it refuses a request
+troubleshooting	diagnosing why traffic stops flowing
+troubleshooting	the service degraded after a change, what is responsible
+troubleshooting	how do I find the reason a request was denied
+troubleshooting	sessions terminate unexpectedly, what does the standard say
+troubleshooting	what goes wrong when an element restarts
+troubleshooting	the device cannot stay attached, where is the fault
+troubleshooting	which error value is returned on failure
+
+# ── clause_lookup: a definition, value, field or object in one spec ───────────
+clause_lookup	what is the definition of this parameter
+clause_lookup	which information element carries this value
+clause_lookup	what is the permitted range for this setting
+clause_lookup	list the attributes of this managed object
+clause_lookup	what does this abbreviation stand for
+clause_lookup	which class does this object inherit from
+clause_lookup	what is the format of this identifier
+clause_lookup	what are the allowed values for this field
+clause_lookup	describe the structure of this data type
+clause_lookup	what is the maximum permitted value
+clause_lookup	which counter measures this quantity
+clause_lookup	what is the name of the attribute holding this configuration
+
+# ── out_of_scope: operational or commercial — not in any indexed document ─────
+# 2026-07-31: "vendor specific command" and "configuration syntax" exemplars
+# removed — vendor CLI/YANG references (Junos, Cisco, Nokia SR OS) are now
+# indexed, so those questions are IN scope. Replaced with commercial/operational
+# phrasings that remain genuinely unanswerable from the index.
+out_of_scope	which release of the product supports this feature
+out_of_scope	what is the licence cost for this capability
+out_of_scope	is there a security advisory for this equipment
+out_of_scope	what does this vendor alarm code mean
+out_of_scope	when will the vendor ship a fix for this
+out_of_scope	is there a known outage affecting this service

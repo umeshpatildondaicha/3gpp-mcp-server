@@ -1,0 +1,103 @@
+# intents.tsv — the intent catalogue. Nothing about intents is compiled in.
+#
+# Two record types, tab-separated.
+#
+#   intent <TAB> id <TAB> priority <TAB> sticky <TAB> hint shown to the orchestrator
+#   term   <TAB> id <TAB> phrase that classifies the query ON ITS OWN
+#   weak   <TAB> id <TAB> phrase that classifies ONLY alongside another term of
+#                         the same intent (>=2 weak, or 1 weak + 1 strong)
+#
+# FIELDS
+#   id        stable identifier. Referenced by term rows AND by the first column
+#             of intent-exemplars.tsv — the two files must agree or the exemplar
+#             is dropped at startup with a warning.
+#   priority  keyword rules are evaluated in ascending priority, first match wins.
+#             This is what makes "Nokia handover procedure" route to out_of_scope
+#             rather than procedure — it is an ordering decision, not a code path.
+#   sticky    true  → when the keyword rule matches, the embedding classifier is
+#                     not allowed to override it. Use for signals that are
+#                     unambiguous by construction (vendor names).
+#             false → the embedding classifier decides; keyword is fallback only.
+#   hint      free text appended to the response as "Intent: <hint>".
+#
+# The intent with the HIGHEST priority value is the default, used when nothing
+# matches. There must be exactly one intent row with no term rows pointing at it
+# for that to be meaningful — clause_lookup plays that role here.
+#
+# Adding an intent needs no recompile: add an intent row, its term rows, and
+# ideally a block of exemplars in intent-exemplars.tsv so the embedding path can
+# recognise paraphrases of it too.
+
+# ── intent definitions ────────────────────────────────────────────────────────
+intent	out_of_scope	10	true	out-of-scope — this looks commercial or time-sensitive (pricing, advisories, roadmaps, outages); not covered by the indexed standards or vendor references, so prefer WebSearch
+intent	troubleshooting	20	false	troubleshooting — cause codes and failure paths; check the protocol spec's cause-value clause as well as the stage-2 flow
+intent	procedure	30	false	procedure — spans stage-2 flow and stage-3 protocol specs; consider getProcedureFlow for a cross-spec evidence bundle
+intent	clause_lookup	99	false	clause-lookup — a single spec normally owns this answer
+
+# ── out_of_scope: vendor / commercial / operational, never in a published spec ─
+#
+# Vendor NAMES are `weak` on purpose. A brand name is poor evidence of commercial
+# intent: a Bulk-CM payload carries "vendor": "NOKIA" while being a pure
+# standards-validation request. Measured — as a strong term, adding "NOKIA" to
+# "si-Periodicity allowed values SchedulingInfo" flipped the intent from
+# clause-lookup to out-of-scope and told the answer model to distrust perfectly
+# good results. As weak terms they need a commercial word beside them.
+weak	out_of_scope	ericsson
+weak	out_of_scope	huawei
+weak	out_of_scope	samsung
+weak	out_of_scope	zte
+# 'juniper' removed 2026-07-29: the Junos CLI Reference (28,301 chunks, series
+# JUNIPER) is now indexed, so a Junos question is IN scope. Leaving it here made
+# search3gpp answer config-audit queries with "prefer WebSearch" while it was
+# returning the correct Junos statement in the very same response.
+# 'nokia' and 'cisco' removed 2026-07-31: their CLI/YANG corpora (series NOKIA,
+# CISCO — merged into telecom_extras.db) are now indexed, same reasoning.
+# Re-check this list whenever a vendor corpus is added.
+term	out_of_scope	cve-
+term	out_of_scope	alarm catalog
+term	out_of_scope	vulnerability advisory
+term	out_of_scope	pricing
+term	out_of_scope	license cost
+term	out_of_scope	roadmap
+term	out_of_scope	outage
+term	out_of_scope	release notes
+# 'command syntax' and 'cli command' removed 2026-07-31: vendor CLI references
+# (Junos, Cisco IOS XE, Nokia SR OS — 28,301 CLI chunks plus YANG models) are
+# indexed, so a command-syntax question is IN scope and answerable.
+
+# ── troubleshooting ───────────────────────────────────────────────────────────
+term	troubleshooting	cause code
+term	troubleshooting	cause value
+term	troubleshooting	failure
+term	troubleshooting	reject
+term	troubleshooting	error
+term	troubleshooting	fault
+term	troubleshooting	root cause
+term	troubleshooting	troubleshoot
+term	troubleshooting	debug
+term	troubleshooting	why does
+term	troubleshooting	not working
+term	troubleshooting	drop
+term	troubleshooting	timeout
+term	troubleshooting	restart
+
+# ── procedure ─────────────────────────────────────────────────────────────────
+term	procedure	procedure
+term	procedure	call flow
+term	procedure	callflow
+term	procedure	flow
+term	procedure	sequence
+term	procedure	signalling
+term	procedure	signaling
+term	procedure	establishment
+term	procedure	setup
+term	procedure	registration
+term	procedure	attach
+term	procedure	handover
+term	procedure	activation
+term	procedure	deactivation
+term	procedure	modification
+term	procedure	release
+term	procedure	step
+term	procedure	msc
+term	procedure	message sequence

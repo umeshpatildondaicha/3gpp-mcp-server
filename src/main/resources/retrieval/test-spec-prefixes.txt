@@ -1,0 +1,25 @@
+# UE conformance / test specification families.
+#
+# These describe how to TEST a procedure, never how the procedure works, so they
+# are never the right citation in a call flow. They ARE legitimate hits for other
+# queries ("what is the conformance test for X"), so this is a getProcedureFlow
+# filter, not a global discount.
+#
+# Matched against the spec id up to the first '-', so "38.523-1" matches "38.523".
+# One prefix per line; blank lines and '#' comments ignored.
+#
+# Measured: before this filter, the 10-procedure eval returned 36.508, 36.523-1,
+# 36.579-3, 38.508, 38.508-1, 38.523-1 and 38.523-3 as procedure evidence.
+36.508
+36.509
+36.521
+36.523
+36.579
+37.571
+38.508
+38.509
+38.521
+38.523
+38.533
+34.123
+34.229
