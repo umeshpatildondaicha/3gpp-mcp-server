@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,9 +65,16 @@ public class ScopeGateService {
     /** A residual shorter than this is punctuation and stop-words, not a query. */
     private static final int MIN_RESIDUAL_CHARS = 8;
 
+    /** A spec-ownership row needs at least a marker and its owning spec id. */
+    private static final int MIN_OWNERSHIP_COLUMNS = 2;
+    /** Optional 3rd column: human-readable topic; falls back to the spec id. */
+    private static final int TOPIC_COLUMN = 2;
+    /** Optional 4th column: "note" = partial coverage; anything else blocks. */
+    private static final int BLOCK_MODE_COLUMN = 3;
+
     private final List<Ownership> ownerships;
     /** Markers whose owning spec is absent from the index — the only ones that fire. */
-    private volatile List<Ownership> active = List.of();
+    private final AtomicReference<List<Ownership>> active = new AtomicReference<>(List.of());
 
     public ScopeGateService(ResourceLoader resourceLoader, RetrievalProperties props) {
         this.ownerships = load(resourceLoader, props.specOwnershipPath());
@@ -81,7 +89,7 @@ public class ScopeGateService {
         for (Ownership o : ownerships) {
             if (!indexedSpecIds.contains(o.specId())) live.add(o);
         }
-        this.active = List.copyOf(live);
+        this.active.set(List.copyOf(live));
         int suppressed = ownerships.size() - live.size();
         log.info("scope gate: {} marker(s) active, {} suppressed because their owning spec IS indexed",
                 live.size(), suppressed);
@@ -131,7 +139,8 @@ public class ScopeGateService {
     }
 
     public Decision decide(String query) {
-        if (query == null || query.isBlank() || active.isEmpty()) return null;
+        List<Ownership> live = active.get();
+        if (query == null || query.isBlank() || live.isEmpty()) return null;
         String q = query.toLowerCase(Locale.ROOT);
 
         // Group the hits by owning spec so a query naming several markers of the
@@ -139,7 +148,7 @@ public class ScopeGateService {
         Map<String, String> byspec = new LinkedHashMap<>();
         List<String> matched = new ArrayList<>();
         boolean block = false;
-        for (Ownership o : active) {
+        for (Ownership o : live) {
             if (containsWord(q, o.marker())) {
                 byspec.putIfAbsent(o.specId(), o.topic());
                 matched.add(o.marker());
@@ -210,20 +219,8 @@ public class ScopeGateService {
              BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#")) continue;
-                String[] parts = t.split("\t");
-                if (parts.length < 2) continue;
-                String marker = parts[0].strip().toLowerCase(Locale.ROOT);
-                String spec   = parts[1].strip();
-                String topic  = parts.length > 2 ? parts[2].strip() : spec;
-                // 4th column: "note" = partial coverage, answer with a caveat.
-                // Absent or anything else = block, which stays the safe default.
-                boolean block = parts.length <= 3
-                        || !"note".equalsIgnoreCase(parts[3].strip());
-                if (!marker.isEmpty() && !spec.isEmpty()) {
-                    out.add(new Ownership(marker, spec, topic, block));
-                }
+                Ownership ownership = parseOwnership(line);
+                if (ownership != null) out.add(ownership);
             }
         } catch (IOException e) {
             log.warn("failed reading spec-ownership from {}: {} — scope gate disabled", path, e.getMessage());
@@ -232,8 +229,25 @@ public class ScopeGateService {
         return List.copyOf(out);
     }
 
+    /** One TSV row → an {@link Ownership}, or {@code null} for comments and malformed rows. */
+    private static Ownership parseOwnership(String line) {
+        String t = line.strip();
+        if (t.isEmpty() || t.startsWith("#")) return null;
+        String[] parts = t.split("\t");
+        if (parts.length < MIN_OWNERSHIP_COLUMNS) return null;
+        String marker = parts[0].strip().toLowerCase(Locale.ROOT);
+        String spec   = parts[1].strip();
+        String topic  = parts.length > TOPIC_COLUMN ? parts[TOPIC_COLUMN].strip() : spec;
+        // 4th column: "note" = partial coverage, answer with a caveat.
+        // Absent or anything else = block, which stays the safe default.
+        boolean block = parts.length <= BLOCK_MODE_COLUMN
+                || !"note".equalsIgnoreCase(parts[BLOCK_MODE_COLUMN].strip());
+        if (marker.isEmpty() || spec.isEmpty()) return null;
+        return new Ownership(marker, spec, topic, block);
+    }
+
     /** Visible for tests. */
     int markerCount() { return ownerships.size(); }
 
-    int activeMarkerCount() { return active.size(); }
+    int activeMarkerCount() { return active.get().size(); }
 }

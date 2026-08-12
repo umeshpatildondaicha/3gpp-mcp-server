@@ -2,6 +2,7 @@ package com.vwaves.mcp.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -266,26 +267,26 @@ class RetrievalSignalsTest {
             // embedding. Caught by size, which is what actually makes it unusable.
             String item = "{\"parameterName\":\"siPeriodicity\",\"goldenValue\":\"rf64\","
                     + "\"currentValue\":\"rf1024\",\"moHierarchy\":\"/x/y/z\"},";
-            assertTrue(ThreeGppToolService.looksLikeDocument(
-                    "{\"data\":{\"nonCompliancedata\":[" + item.repeat(20) + "]}}") != null);
+            assertNotNull(ThreeGppToolService.looksLikeDocument(
+                    "{\"data\":{\"nonCompliancedata\":[" + item.repeat(20) + "]}}"));
         }
 
         @Test
         void rejectsOverlongInput() {
-            assertTrue(ThreeGppToolService.looksLikeDocument("si-Periodicity ".repeat(200)) != null);
+            assertNotNull(ThreeGppToolService.looksLikeDocument("si-Periodicity ".repeat(200)));
         }
 
         @Test
         void rejectsManyLinePaste() {
-            assertTrue(ThreeGppToolService.looksLikeDocument("a\n".repeat(20)) != null);
+            assertNotNull(ThreeGppToolService.looksLikeDocument("a\n".repeat(20)));
         }
 
         @Test
         void rejectsLargeXmlDocument() {
-            assertTrue(ThreeGppToolService.looksLikeDocument(
+            assertNotNull(ThreeGppToolService.looksLikeDocument(
                     "<?xml version=\"1.0\"?><configData>"
                     + "<attr name=\"siPeriodicity\">rf1024</attr>".repeat(20)
-                    + "</configData>") != null);
+                    + "</configData>"));
         }
 
         @Test

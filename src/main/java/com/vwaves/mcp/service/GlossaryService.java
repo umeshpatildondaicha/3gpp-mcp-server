@@ -20,6 +20,12 @@ import org.springframework.stereotype.Service;
 public class GlossaryService {
     private static final Logger log = LoggerFactory.getLogger(GlossaryService.class);
 
+    /** Tokens shorter/longer than this are never abbreviations worth expanding. */
+    private static final int MIN_ABBREVIATION_LENGTH = 2;
+    private static final int MAX_ABBREVIATION_LENGTH = 12;
+    /** Glossary TSV rows are exactly: abbreviation TAB expansion. */
+    private static final int TSV_COLUMNS = 2;
+
     private final Map<String, String> abbreviations;
 
     public GlossaryService(
@@ -38,7 +44,7 @@ public class GlossaryService {
         StringBuilder appended = new StringBuilder();
         for (String token : query.split("\\s+")) {
             String cleaned = token.replaceAll("[^A-Za-z0-9-]", "").toUpperCase();
-            if (cleaned.length() < 2 || cleaned.length() > 12) {
+            if (cleaned.length() < MIN_ABBREVIATION_LENGTH || cleaned.length() > MAX_ABBREVIATION_LENGTH) {
                 continue;
             }
             String exp = abbreviations.get(cleaned);
@@ -64,23 +70,27 @@ public class GlossaryService {
              BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
-                String trimmed = line.strip();
-                if (trimmed.isEmpty() || trimmed.startsWith("#")) {
-                    continue;
-                }
-                String[] parts = trimmed.split("\t", 2);
-                if (parts.length != 2) {
-                    continue;
-                }
-                String key   = parts[0].strip().toUpperCase();
-                String value = parts[1].strip();
-                if (!key.isEmpty() && !value.isEmpty()) {
-                    map.put(key, value);
-                }
+                addEntry(map, line);
             }
         } catch (IOException e) {
             log.warn("failed reading glossary {}: {}", path, e.getMessage());
         }
         return map;
+    }
+
+    private static void addEntry(Map<String, String> map, String line) {
+        String trimmed = line.strip();
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+            return;
+        }
+        String[] parts = trimmed.split("\t", TSV_COLUMNS);
+        if (parts.length != TSV_COLUMNS) {
+            return;
+        }
+        String key   = parts[0].strip().toUpperCase();
+        String value = parts[1].strip();
+        if (!key.isEmpty() && !value.isEmpty()) {
+            map.put(key, value);
+        }
     }
 }

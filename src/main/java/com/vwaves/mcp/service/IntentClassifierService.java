@@ -7,7 +7,10 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.Resource;
@@ -39,7 +42,32 @@ import org.springframework.stereotype.Service;
 public class IntentClassifierService {
     private static final Logger log = LoggerFactory.getLogger(IntentClassifierService.class);
 
-    private record Exemplar(IntentCatalogService.Intent intent, String text, float[] vector) {}
+    /** An exemplar row is "id<TAB>text" — exactly two columns. */
+    private static final int EXEMPLAR_COLUMNS = 2;
+
+    /** Similarities are reported rounded to three decimal places. */
+    private static final double SIMILARITY_ROUND_SCALE = 1000.0;
+
+    private record Exemplar(IntentCatalogService.Intent intent, String text, float[] vector) {
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Exemplar other
+                    && Objects.equals(intent, other.intent)
+                    && Objects.equals(text, other.text)
+                    && Arrays.equals(vector, other.vector);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(intent, text, Arrays.hashCode(vector));
+        }
+
+        @Override
+        public String toString() {
+            return "Exemplar[intent=" + intent + ", text=" + text
+                    + ", vector=" + Arrays.toString(vector) + "]";
+        }
+    }
 
     private final ResourceLoader resourceLoader;
     private final EmbeddingService embeddingService;
@@ -47,7 +75,7 @@ public class IntentClassifierService {
     private final String exemplarPath;
     private final double minSimilarity;
 
-    private volatile List<Exemplar> exemplars = List.of();
+    private final AtomicReference<List<Exemplar>> exemplars = new AtomicReference<>(List.of());
 
     public IntentClassifierService(ResourceLoader resourceLoader,
                                    EmbeddingService embeddingService,
@@ -78,28 +106,14 @@ public class IntentClassifierService {
              BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#")) continue;
-                String[] parts = t.split("\t", 2);
-                if (parts.length != 2) continue;
-                String id = parts[0].strip();
-                String text = parts[1].strip();
-                if (text.isEmpty()) continue;
-                // An exemplar naming an intent that intents.tsv does not declare is
-                // dead config — drop it loudly rather than silently rehoming it.
-                if (!catalog.isKnown(id)) {
-                    log.warn("intent exemplar names unknown intent '{}' — skipped: {}", id, text);
-                    skipped++;
-                    continue;
-                }
-                loaded.add(new Exemplar(catalog.byId(id), text, embeddingService.embed(text)));
+                skipped += loadExemplarLine(line, loaded);
             }
         } catch (IOException e) {
             log.warn("failed reading intent exemplars from {}: {} — keyword rules only",
                     exemplarPath, e.getMessage());
             return;
         }
-        this.exemplars = List.copyOf(loaded);
+        this.exemplars.set(List.copyOf(loaded));
         log.info("intent classifier ready: {} exemplars embedded in {} ms ({} skipped, min-similarity={})",
                 loaded.size(), System.currentTimeMillis() - t0, skipped, minSimilarity);
 
@@ -119,6 +133,29 @@ public class IntentClassifierService {
         }
     }
 
+    /**
+     * Parse one exemplar TSV line, embedding and adding it to {@code loaded} when valid.
+     *
+     * @return 1 when the line named an unknown intent and was skipped, else 0
+     */
+    private int loadExemplarLine(String line, List<Exemplar> loaded) {
+        String t = line.strip();
+        if (t.isEmpty() || t.startsWith("#")) return 0;
+        String[] parts = t.split("\t", EXEMPLAR_COLUMNS);
+        if (parts.length != EXEMPLAR_COLUMNS) return 0;
+        String id = parts[0].strip();
+        String text = parts[1].strip();
+        if (text.isEmpty()) return 0;
+        // An exemplar naming an intent that intents.tsv does not declare is
+        // dead config — drop it loudly rather than silently rehoming it.
+        if (!catalog.isKnown(id)) {
+            log.warn("intent exemplar names unknown intent '{}' — skipped: {}", id, text);
+            return 1;
+        }
+        loaded.add(new Exemplar(catalog.byId(id), text, embeddingService.embed(text)));
+        return 0;
+    }
+
     /** Classified intent plus how the decision was reached, for logging and tests. */
     public record Result(IntentCatalogService.Intent intent, String method, double similarity) {}
 
@@ -133,7 +170,7 @@ public class IntentClassifierService {
             return new Result(keyword, "keyword-sticky", 1.0);
         }
 
-        List<Exemplar> ex = exemplars;
+        List<Exemplar> ex = exemplars.get();
         if (!ex.isEmpty()) {
             float[] q = embeddingService.embed(query);
             Exemplar best = null;
@@ -155,7 +192,7 @@ public class IntentClassifierService {
     }
 
     private static double round(double v) {
-        return Math.round(v * 1000.0) / 1000.0;
+        return Math.round(v * SIMILARITY_ROUND_SCALE) / SIMILARITY_ROUND_SCALE;
     }
 
     /** Both vectors are L2-normalised by EmbeddingService, so the dot product is the cosine. */
@@ -168,6 +205,6 @@ public class IntentClassifierService {
 
     /** Visible for tests. */
     int exemplarCount() {
-        return exemplars.size();
+        return exemplars.get().size();
     }
 }

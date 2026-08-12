@@ -25,6 +25,9 @@ import org.springframework.stereotype.Service;
 public class SeriesCatalogService {
     private static final Logger log = LoggerFactory.getLogger(SeriesCatalogService.class);
 
+    /** Catalogue TSV rows are exactly: series TAB description. */
+    private static final int TSV_COLUMNS = 2;
+
     private final Map<String, String> catalog;
 
     public SeriesCatalogService(ResourceLoader resourceLoader, RetrievalProperties props) {
@@ -52,17 +55,21 @@ public class SeriesCatalogService {
                 new InputStreamReader(resource.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#")) continue;
-                String[] p = t.split("\t", 2);
-                if (p.length != 2) continue;
-                String k = p[0].strip();
-                String v = p[1].strip();
-                if (!k.isEmpty() && !v.isEmpty()) raw.put(k, v);
+                putEntry(raw, line);
             }
         } catch (IOException e) {
             log.warn("failed reading series catalogue from {}: {}", path, e.getMessage());
         }
         return new LinkedHashMap<>(raw);
+    }
+
+    private static void putEntry(Map<String, String> raw, String line) {
+        String t = line.strip();
+        if (t.isEmpty() || t.startsWith("#")) return;
+        String[] p = t.split("\t", TSV_COLUMNS);
+        if (p.length != TSV_COLUMNS) return;
+        String k = p[0].strip();
+        String v = p[1].strip();
+        if (!k.isEmpty() && !v.isEmpty()) raw.put(k, v);
     }
 }

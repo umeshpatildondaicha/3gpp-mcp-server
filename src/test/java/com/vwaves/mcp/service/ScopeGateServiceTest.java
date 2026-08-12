@@ -1,5 +1,6 @@
 package com.vwaves.mcp.service;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -83,7 +84,7 @@ class ScopeGateServiceTest {
             // "pfcp" and "n4 session" both map to 29.244 — it should be listed once.
             String r = gate.outOfScopeReason("PFCP n4 session establishment");
             assertNotNull(r);
-            assertTrue(r.indexOf("29.244") == r.lastIndexOf("29.244"),
+            assertEquals(r.indexOf("29.244"), r.lastIndexOf("29.244"),
                     "29.244 should appear exactly once: " + r);
         }
     }

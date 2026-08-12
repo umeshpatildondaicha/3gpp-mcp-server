@@ -7,6 +7,8 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +33,27 @@ import org.springframework.stereotype.Service;
 public class ProcedureLayerService {
     private static final Logger log = LoggerFactory.getLogger(ProcedureLayerService.class);
 
+    // ── procedure-layers TSV format (tab-separated columns) ──────────────────
+    /** "alias" rows need at least: kind, alias, canonical. */
+    private static final int ALIAS_MIN_FIELDS = 3;
+    /** Column holding the canonical technology value in an "alias" row. */
+    private static final int ALIAS_CANONICAL_COL = 2;
+    /** "layer" rows need: kind, series, order, technology, perLayer, prefer, label. */
+    private static final int LAYER_MIN_FIELDS = 7;
+    /** Column holding the numeric display order in a "layer" row. */
+    private static final int LAYER_ORDER_COL = 2;
+    /** Column holding the technology ("5g", "4g", "any") in a "layer" row. */
+    private static final int LAYER_TECHNOLOGY_COL = 3;
+    /** Column holding the numeric per-layer hit budget in a "layer" row. */
+    private static final int LAYER_PER_LAYER_COL = 4;
+    /** Column holding the comma-separated preferred spec prefixes ("-" = none). */
+    private static final int LAYER_PREFER_COL = 5;
+    /** Column holding the human-readable layer label in a "layer" row. */
+    private static final int LAYER_LABEL_COL = 6;
+
+    /** procedure-synonyms rows are exactly: key TAB expansion. */
+    private static final int SYNONYM_FIELD_COUNT = 2;
+
     /**
      * @param prefer spec-id prefixes boosted within this layer. A ranking nudge,
      *        not a filter, so interworking procedures still surface the other
@@ -46,7 +69,11 @@ public class ProcedureLayerService {
     public ProcedureLayerService(ResourceLoader resourceLoader, RetrievalProperties props) {
         Map<String, String> aliases = new LinkedHashMap<>();
         this.layers = loadLayers(resourceLoader, props.procedureLayersPath(), aliases);
-        this.techAliases = Map.copyOf(aliases);
+        // Collections.unmodifiableMap, NOT Map.copyOf: expansion and alias matching
+        // iterate these maps, and Map.copyOf randomises iteration order per JVM —
+        // the same query could expand differently across restarts. The wrapper
+        // keeps the LinkedHashMap's file order, so behavior follows the table.
+        this.techAliases = Collections.unmodifiableMap(aliases);
         this.synonyms = loadSynonyms(resourceLoader, props.procedureSynonymsPath());
         log.info("procedure config: {} layer(s), {} technology alias(es), {} synonym(s)",
                 layers.size(), techAliases.size(), synonyms.size());
@@ -121,28 +148,7 @@ public class ProcedureLayerService {
             int lineNo = 0;
             while ((line = br.readLine()) != null) {
                 lineNo++;
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#")) continue;
-                String[] p = t.split("\t");
-                String kind = p[0].strip().toLowerCase(Locale.ROOT);
-                if ("alias".equals(kind) && p.length >= 3) {
-                    aliasesOut.put(p[1].strip().toLowerCase(Locale.ROOT),
-                            p[2].strip().toLowerCase(Locale.ROOT));
-                    continue;
-                }
-                if (!"layer".equals(kind) || p.length < 7) {
-                    log.warn("procedure-layers line {}: unrecognised row '{}' — skipped", lineNo, t);
-                    continue;
-                }
-                try {
-                    List<String> prefer = "-".equals(p[5].strip())
-                            ? List.of()
-                            : List.of(p[5].strip().split("\\s*,\\s*"));
-                    out.add(new Layer(p[1].strip(), Integer.parseInt(p[2].strip()),
-                            p[3].strip(), Integer.parseInt(p[4].strip()), prefer, p[6].strip()));
-                } catch (NumberFormatException e) {
-                    log.warn("procedure-layers line {}: non-numeric order/perLayer — skipped", lineNo);
-                }
+                parseLayersLine(line, lineNo, out, aliasesOut);
             }
         } catch (IOException e) {
             log.warn("failed reading procedure-layers from {}: {}", path, e.getMessage());
@@ -150,28 +156,64 @@ public class ProcedureLayerService {
         return List.copyOf(out);
     }
 
+    private static void parseLayersLine(String line, int lineNo, List<Layer> out,
+                                        Map<String, String> aliasesOut) {
+        String t = line.strip();
+        if (t.isEmpty() || t.startsWith("#")) return;
+        String[] p = t.split("\t");
+        String kind = p[0].strip().toLowerCase(Locale.ROOT);
+        if ("alias".equals(kind) && p.length >= ALIAS_MIN_FIELDS) {
+            aliasesOut.put(p[1].strip().toLowerCase(Locale.ROOT),
+                    p[ALIAS_CANONICAL_COL].strip().toLowerCase(Locale.ROOT));
+            return;
+        }
+        if (!"layer".equals(kind) || p.length < LAYER_MIN_FIELDS) {
+            log.warn("procedure-layers line {}: unrecognised row '{}' — skipped", lineNo, t);
+            return;
+        }
+        parseLayerRow(p, lineNo, out);
+    }
+
+    private static void parseLayerRow(String[] p, int lineNo, List<Layer> out) {
+        try {
+            List<String> prefer = "-".equals(p[LAYER_PREFER_COL].strip())
+                    ? List.of()
+                    : Arrays.stream(p[LAYER_PREFER_COL].split(",")).map(String::strip).toList();
+            out.add(new Layer(p[1].strip(), Integer.parseInt(p[LAYER_ORDER_COL].strip()),
+                    p[LAYER_TECHNOLOGY_COL].strip(), Integer.parseInt(p[LAYER_PER_LAYER_COL].strip()),
+                    prefer, p[LAYER_LABEL_COL].strip()));
+        } catch (NumberFormatException e) {
+            log.warn("procedure-layers line {}: non-numeric order/perLayer — skipped", lineNo);
+        }
+    }
+
     private static Map<String, String> loadSynonyms(ResourceLoader rl, String path) {
         Map<String, String> out = new LinkedHashMap<>();
         Resource resource = rl.getResource(path);
         if (!resource.exists()) {
             log.warn("procedure-synonyms not found at {} — no query expansion", path);
-            return Map.copyOf(out);
+            return Collections.unmodifiableMap(out);
         }
         try (BufferedReader br = reader(resource)) {
             String line;
             while ((line = br.readLine()) != null) {
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#")) continue;
-                String[] p = t.split("\t", 2);
-                if (p.length != 2) continue;
-                String k = p[0].strip().toLowerCase(Locale.ROOT);
-                String v = p[1].strip();
-                if (!k.isEmpty() && !v.isEmpty()) out.put(k, v);
+                parseSynonymLine(line, out);
             }
         } catch (IOException e) {
             log.warn("failed reading procedure-synonyms from {}: {}", path, e.getMessage());
         }
-        return Map.copyOf(out);
+        // File order preserved — see the techAliases comment in the constructor.
+        return Collections.unmodifiableMap(out);
+    }
+
+    private static void parseSynonymLine(String line, Map<String, String> out) {
+        String t = line.strip();
+        if (t.isEmpty() || t.startsWith("#")) return;
+        String[] p = t.split("\t", SYNONYM_FIELD_COUNT);
+        if (p.length != SYNONYM_FIELD_COUNT) return;
+        String k = p[0].strip().toLowerCase(Locale.ROOT);
+        String v = p[1].strip();
+        if (!k.isEmpty() && !v.isEmpty()) out.put(k, v);
     }
 
     private static BufferedReader reader(Resource r) throws IOException {

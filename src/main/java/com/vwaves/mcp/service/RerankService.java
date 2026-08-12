@@ -62,6 +62,24 @@ public class RerankService {
     // More threads = faster inference, but diminishing returns above physical cores.
     private static final int    ONNX_INTRA_THREADS = Math.max(4,
             Runtime.getRuntime().availableProcessors() / 2);
+    // Threads ONNX Runtime uses to run independent graph nodes in parallel.
+    private static final int    ONNX_INTER_THREADS = 2;
+
+    /** Rounds reranker scores to 4 decimal places (multiply, round, divide). */
+    private static final double SCORE_ROUNDING_FACTOR = 10_000.0;
+
+    /** Scale factor for integer percentage arithmetic (avoids float division). */
+    private static final int PERCENT_SCALE = 100;
+
+    // ── Model download ────────────────────────────────────────────────────────
+    private static final int DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 30;
+    private static final int DOWNLOAD_REQUEST_TIMEOUT_MINUTES = 10;
+    private static final int HTTP_OK = 200;
+
+    /** Number of SHA-256 bytes kept for the cache-key digest. */
+    private static final int SHORT_HASH_BYTES = 6;
+    /** Hex length of the digest: two characters per byte. */
+    private static final int SHORT_HASH_HEX_CHARS = 12;
 
     private final String  modelUri;
     private final String  tokenizerUri;
@@ -128,7 +146,7 @@ public class RerankService {
             ortEnv = OrtEnvironment.getEnvironment();
             try (OrtSession.SessionOptions opts = new OrtSession.SessionOptions()) {
                 opts.setIntraOpNumThreads(ONNX_INTRA_THREADS);
-                opts.setInterOpNumThreads(2);
+                opts.setInterOpNumThreads(ONNX_INTER_THREADS);
                 ortSession = ortEnv.createSession(modelPath.toString(), opts);
             }
             log.info("Reranker ONNX session created ({} intra-op threads)", ONNX_INTRA_THREADS);
@@ -136,8 +154,11 @@ public class RerankService {
             log.debug("Reranker ONNX inputs: {}", inputNames);
 
             float warmup = score("warmup query text", "warmup passage for cross-encoder init");
-            log.info("Reranker ready: {} (max-length={}, warmup score={}, {} ms)",
-                    modelUri, maxLength, String.format("%.4f", warmup), System.currentTimeMillis() - t0);
+            if (log.isInfoEnabled()) {
+                log.info("Reranker ready: {} (max-length={}, warmup score={}, {} ms)",
+                        modelUri, maxLength, String.format("%.4f", warmup),
+                        System.currentTimeMillis() - t0);
+            }
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -176,7 +197,7 @@ public class RerankService {
         List<SearchHit> out = new ArrayList<>(limit);
         for (int i = 0; i < limit; i++) {
             ScoredHit sh   = scored.get(i);
-            double rounded = Math.round(sh.score() * 10000.0) / 10000.0;
+            double rounded = Math.round(sh.score() * SCORE_ROUNDING_FACTOR) / SCORE_ROUNDING_FACTOR;
             // withScore keeps chunkId / docType / denseScore, which the caller
             // needs for the study-report discount, release boost and vector rescue.
             out.add(sh.hit().withScore(rounded));
@@ -246,7 +267,17 @@ public class RerankService {
         }
 
         float[] scores = scoreTexts(query, sentences);
+        List<Integer> picked = pickSentences(sentences, scores, cfg);
+        TreeSet<Integer> windowed = expandWindows(picked, cfg.window(), sentences.size());
+        return joinInDocumentOrder(sentences, windowed);
+    }
 
+    /**
+     * Chooses the sentence indices to keep: adaptive score floor, list-aware
+     * enumeration bypass, then MMR selection.
+     */
+    private List<Integer> pickSentences(List<String> sentences, float[] scores,
+                                        SelectionConfig cfg) {
         float top = 0f;
         for (float s : scores) if (s > top) top = s;
 
@@ -275,9 +306,7 @@ public class RerankService {
         }
         if (eligible.isEmpty()) {
             // No sentence cleared the floor — fall back to the single best one.
-            int best = 0;
-            for (int i = 1; i < scores.length; i++) if (scores[i] > scores[best]) best = i;
-            eligible.add(best);
+            eligible.add(indexOfBest(scores));
         }
 
         double lambda;
@@ -296,16 +325,31 @@ public class RerankService {
             maxPicks = cfg.maxSentences();
         }
 
-        List<Integer> picked = mmrSelect(sentences, scores, eligible,
-                maxPicks, lambda);
+        return mmrSelect(sentences, scores, eligible, maxPicks, lambda);
+    }
 
+    /** Index of the highest-scoring sentence. */
+    private static int indexOfBest(float[] scores) {
+        int best = 0;
+        for (int i = 1; i < scores.length; i++) if (scores[i] > scores[best]) best = i;
+        return best;
+    }
+
+    /** Expands each pick to include ±window neighbor sentences for context. */
+    private static TreeSet<Integer> expandWindows(List<Integer> picked, int window,
+                                                  int sentenceCount) {
         TreeSet<Integer> windowed = new TreeSet<>();
         for (int idx : picked) {
-            int lo = Math.max(0, idx - cfg.window());
-            int hi = Math.min(sentences.size() - 1, idx + cfg.window());
+            int lo = Math.max(0, idx - window);
+            int hi = Math.min(sentenceCount - 1, idx + window);
             for (int n = lo; n <= hi; n++) windowed.add(n);
         }
+        return windowed;
+    }
 
+    /** Emits kept sentences in document order, marking elided gaps. */
+    private static String joinInDocumentOrder(List<String> sentences,
+                                              TreeSet<Integer> windowed) {
         StringBuilder out = new StringBuilder();
         Integer prev = null;
         for (int idx : windowed) {
@@ -398,18 +442,28 @@ public class RerankService {
         if (sentences.size() < cfg.minBucketCount()) return false;
         Map<String, Integer> buckets = new HashMap<>();
         for (String sentence : sentences) {
-            String[] toks = sentence.split("\\s+");
-            if (toks.length <= cfg.bucketTokenIndex()) continue;
-            String key = toks[cfg.bucketTokenIndex()]
-                    .replaceAll("[^A-Za-z0-9]", "")
-                    .toLowerCase(Locale.ROOT);
-            if (key.length() < cfg.minSecondTokenLength()) continue;
-            buckets.merge(key, 1, Integer::sum);
+            String key = bucketKey(sentence, cfg);
+            if (key != null) buckets.merge(key, 1, Integer::sum);
         }
         for (int count : buckets.values()) {
             if (count >= cfg.minBucketCount()) return true;
         }
         return false;
+    }
+
+    /**
+     * Bucket key for a sentence (normalised token at the configured index), or
+     * {@code null} when the sentence has no usable token there.
+     */
+    private static String bucketKey(String sentence,
+                                    SentenceSelectionProperties.Enumeration cfg) {
+        String[] toks = sentence.split("\\s+");
+        if (toks.length <= cfg.bucketTokenIndex()) return null;
+        String key = toks[cfg.bucketTokenIndex()]
+                .replaceAll("[^A-Za-z0-9]", "")
+                .toLowerCase(Locale.ROOT);
+        if (key.length() < cfg.minSecondTokenLength()) return null;
+        return key;
     }
 
     /**
@@ -440,20 +494,28 @@ public class RerankService {
 
         // Heuristic 2: short-line dominance (only when newlines are preserved).
         String[] lines = raw.split("\\r?\\n");
-        if (lines.length >= cfg.shapeMinLines()) {
-            int total = 0, shortLines = 0;
-            for (String l : lines) {
-                String t = l.strip();
-                if (t.isEmpty()) continue;
-                total++;
-                if (t.length() < cfg.shortLineMaxChars()) shortLines++;
-            }
-            if (total >= cfg.shapeMinLines()
-                    && shortLines * 100 >= total * cfg.shortLineRatioPct()) {
-                return ChunkShape.TABLE_OR_TOC;
-            }
+        if (lines.length >= cfg.shapeMinLines() && shortLinesDominate(lines, cfg)) {
+            return ChunkShape.TABLE_OR_TOC;
         }
         return ChunkShape.PROSE;
+    }
+
+    /**
+     * True when there are at least {@code shapeMinLines} non-empty lines and
+     * ≥{@code shortLineRatioPct}% of them fall below {@code shortLineMaxChars}.
+     */
+    private static boolean shortLinesDominate(String[] lines,
+                                              SentenceSelectionProperties.Detection cfg) {
+        int total = 0;
+        int shortLines = 0;
+        for (String l : lines) {
+            String t = l.strip();
+            if (t.isEmpty()) continue;
+            total++;
+            if (t.length() < cfg.shortLineMaxChars()) shortLines++;
+        }
+        return total >= cfg.shapeMinLines()
+                && shortLines * PERCENT_SCALE >= total * cfg.shortLineRatioPct();
     }
 
     /** Visible for testing — the two shapes the selector distinguishes. */
@@ -698,12 +760,12 @@ public class RerankService {
         log.info("Reranker: downloading {} → {}", url, dest);
         HttpClient client = HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.ALWAYS)
-                .connectTimeout(Duration.ofSeconds(30))
+                .connectTimeout(Duration.ofSeconds(DOWNLOAD_CONNECT_TIMEOUT_SECONDS))
                 .build();
 
         HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofMinutes(10))
+                .timeout(Duration.ofMinutes(DOWNLOAD_REQUEST_TIMEOUT_MINUTES))
                 .GET();
 
         // Honour HF_TOKEN env var for gated or private HuggingFace models
@@ -714,14 +776,16 @@ public class RerankService {
 
         Path tmp = dest.resolveSibling(filename + ".tmp");
         HttpResponse<Path> response = client.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofFile(tmp));
-        if (response.statusCode() != 200) {
+        if (response.statusCode() != HTTP_OK) {
             Files.deleteIfExists(tmp);
             throw new IOException("Download failed HTTP " + response.statusCode() + " for " + url
                     + (hfToken == null ? " (tip: set HF_TOKEN env var if model is gated)" : ""));
         }
         Files.move(tmp, dest, StandardCopyOption.REPLACE_EXISTING);
-        log.info("Reranker: downloaded {} ({} MB)", filename,
-                String.format("%.1f", Files.size(dest) / 1_000_000.0));
+        if (log.isInfoEnabled()) {
+            log.info("Reranker: downloaded {} ({} MB)", filename,
+                    String.format("%.1f", Files.size(dest) / 1_000_000.0));
+        }
         return dest;
     }
 
@@ -730,8 +794,8 @@ public class RerankService {
         try {
             byte[] d = java.security.MessageDigest.getInstance("SHA-256")
                     .digest(url.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(12);
-            for (int i = 0; i < 6; i++) sb.append(String.format("%02x", d[i]));
+            StringBuilder sb = new StringBuilder(SHORT_HASH_HEX_CHARS);
+            for (int i = 0; i < SHORT_HASH_BYTES; i++) sb.append(String.format("%02x", d[i]));
             return sb.toString();
         } catch (java.security.NoSuchAlgorithmException e) {
             return Integer.toHexString(url.hashCode());

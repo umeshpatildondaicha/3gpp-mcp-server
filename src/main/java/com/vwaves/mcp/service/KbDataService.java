@@ -2,6 +2,7 @@ package com.vwaves.mcp.service;
 
 import com.vwaves.mcp.config.RetrievalProperties;
 import com.vwaves.mcp.model.ChunkMeta;
+import com.vwaves.mcp.model.SearchFilter;
 import com.vwaves.mcp.model.SearchHit;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -25,6 +26,7 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -35,6 +37,67 @@ import org.springframework.stereotype.Service;
 @Service
 public class KbDataService {
     private static final Logger log = LoggerFactory.getLogger(KbDataService.class);
+
+    // ── Named constants (values unchanged from the original inline literals) ──
+
+    /** Bytes per float32 component in an embedding vector blob. */
+    private static final int FLOAT_BYTES = 4;
+    /** Chunk-count ceiling used in the load-time stub statistic log line. */
+    private static final int STUB_LOG_MAX_CHUNKS = 2;
+    /** Round search scores to 4 decimals (multiply, round, divide). */
+    private static final double SCORE_ROUND_FACTOR = 10000.0d;
+    /** Round confidence margin/top-score to 3 decimals. */
+    private static final double CONFIDENCE_ROUND_FACTOR = 1000.0;
+    /** Chunks in each retriever's top tier considered for the co-occurrence boost. */
+    private static final int CO_OCCURRENCE_TOP_N = 10;
+    /** Number of fused rank lists (dense + BM25); numerator of the max RRF score. */
+    private static final double RRF_LIST_COUNT = 2.0;
+    /** Retriever support value meaning "both retrievers agree". */
+    private static final int FULL_RETRIEVER_SUPPORT = 2;
+    /** Queries with at least this many short original terms skip digit expansions. */
+    private static final int SPECIFIC_QUERY_SHORT_TERM_COUNT = 4;
+    /** Maximum length for a term to count as "short" (nssai, rach, pdcp, qos). */
+    private static final int SHORT_TERM_MAX_LENGTH = 6;
+    /** Maximum length for a term to count as "medium" (slicing, bearer, handover). */
+    private static final int MEDIUM_TERM_MAX_LENGTH = 9;
+    /** Cap on digit-containing terms admitted into the AND predicate. */
+    private static final int MAX_DIGIT_AND_TERMS = 6;
+    /** BM25 fetch oversampling factor when in-memory filters are active. */
+    private static final int FILTER_OVERSAMPLE_FACTOR = 10;
+    /** termSpecificity score for short terms. */
+    private static final int SPECIFICITY_SHORT = 2;
+    /** termSpecificity score for medium terms. */
+    private static final int SPECIFICITY_MEDIUM = 3;
+    /** termSpecificity score for long common English words (expansion noise). */
+    private static final int SPECIFICITY_LONG = 4;
+    /** Minimum token length kept by extractFtsTerms. */
+    private static final int MIN_FTS_TERM_LENGTH = 2;
+    /** Intent terms at or below this length require a word-boundary match. */
+    private static final int SHORT_INTENT_TERM_MAX_LENGTH = 3;
+    /** JDBC index of the second SQL placeholder. */
+    private static final int SECOND_SQL_PARAM = 2;
+    /** JDBC index of the third SQL placeholder. */
+    private static final int THIRD_SQL_PARAM = 3;
+    /** Regex group holding the IE definition body in ieDefinitionPattern. */
+    private static final int IE_DEF_GROUP = 2;
+    /** Characters of context captured before an IE definition match. */
+    private static final int IE_CONTEXT_BEFORE_CHARS = 160;
+    /** Characters of context captured after an IE definition match. */
+    private static final int IE_CONTEXT_AFTER_CHARS = 60;
+    /** Leading characters sampled when sniffing for binary chunk text. */
+    private static final int BINARY_SNIFF_CHARS = 600;
+    /** Lowest printable ASCII code point (exclusive lower bound for "bad" chars). */
+    private static final int MIN_PRINTABLE_CHAR = 32;
+    /** Highest printable ASCII code point (exclusive upper bound for "bad" chars). */
+    private static final int MAX_PRINTABLE_CHAR = 126;
+    /** bad * ratio > length  ⇔  more than 1/ratio of sampled chars are non-printable. */
+    private static final int BINARY_BAD_CHAR_RATIO = 5;
+
+    private static final String COL_SPEC_ID = "spec_id";
+    private static final String COL_RELEASE = "release";
+    private static final String SQL_SELECT_CHUNK_TEXT = "SELECT text FROM chunks WHERE id=?";
+    /** Characters stripped from query tokens before FTS matching. */
+    private static final String NON_TERM_CHARS_RE = "[^A-Za-z0-9-]";
 
     private final RerankService rerankService;
     private final RetrievalProperties props;
@@ -55,21 +118,25 @@ public class KbDataService {
     private int dim() { return embeddingService.dim(); }
 
     // Chunk IDs are prefixed "dbIdx:realId" to be unique across two databases.
-    private volatile float[]               allEmbeddings;
-    private volatile String[]              chunkIds;
-    private volatile Map<String, ChunkMeta> chunkMeta;
+    private final AtomicReference<float[]>                atomicEmbeddings = new AtomicReference<>();
+    private final AtomicReference<String[]>               atomicChunkIds   = new AtomicReference<>();
+    private final AtomicReference<Map<String, ChunkMeta>> atomicChunkMeta  = new AtomicReference<>();
     // Per-spec chunk count, used by isStubSpec() to suppress 1-2 chunk
     // "registered but not really ingested" specs from search results.
     // Built once during loadChunkMeta(); never mutated after init.
-    private volatile Map<String, Integer>   specChunkCounts;
+    private final AtomicReference<Map<String, Integer>>   atomicSpecChunkCounts = new AtomicReference<>();
     // spec_id → doc_type ('TS' / 'TR' / etc.); built once at init for O(1) post-rerank lookup
     // when only the SearchHit (no ChunkMeta) is available.
-    private volatile Map<String, String>    docTypeBySpecId;
+    private final AtomicReference<Map<String, String>>    atomicDocTypeBySpecId = new AtomicReference<>();
     // spec_id → (chunk_index → prefixed chunk id), for adjacentContext(). Built once
     // during loadChunkMeta() from the same rows as chunkMeta; only chunks with a
     // known (non -1) chunk_index are entered.
-    private volatile Map<String, NavigableMap<Integer, String>> specChunkIndex;
-    private volatile List<Connection>      connections;
+    private final AtomicReference<Map<String, NavigableMap<Integer, String>>> atomicSpecChunkIndex = new AtomicReference<>();
+    private final AtomicReference<List<Connection>>       atomicConnections = new AtomicReference<>();
+
+    private List<Connection> connections()                { return atomicConnections.get(); }
+    private Map<String, ChunkMeta> chunkMeta()            { return atomicChunkMeta.get(); }
+    private Map<String, Integer> specChunkCounts()        { return atomicSpecChunkCounts.get(); }
 
     // ── Initialization ────────────────────────────────────────────────────────
 
@@ -80,7 +147,7 @@ public class KbDataService {
             log.info("opening DB: {}", p.toAbsolutePath());
             conns.add(DriverManager.getConnection("jdbc:sqlite:" + p.toAbsolutePath()));
         }
-        this.connections = conns;
+        this.atomicConnections.set(conns);
         loadEmbeddings();
         loadChunkMeta();
         startupState.phase("building-fts");
@@ -90,7 +157,7 @@ public class KbDataService {
     // ── FTS5 index ────────────────────────────────────────────────────────────
 
     private void buildFts5IfMissing() throws SQLException {
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             buildFts5ForConn(conn);
         }
     }
@@ -142,12 +209,13 @@ public class KbDataService {
     // ── Data loading ──────────────────────────────────────────────────────────
 
     private void loadEmbeddings() throws SQLException, IOException {
-        log.info("loading embeddings from {} DB(s)...", connections.size());
+        List<Connection> conns = connections();
+        log.info("loading embeddings from {} DB(s)...", conns.size());
         List<String> ids    = new ArrayList<>();
         List<float[]> vecs  = new ArrayList<>();
 
-        for (int dbIdx = 0; dbIdx < connections.size(); dbIdx++) {
-            Connection conn = connections.get(dbIdx);
+        for (int dbIdx = 0; dbIdx < conns.size(); dbIdx++) {
+            Connection conn = conns.get(dbIdx);
 
             // Verify vector dimension before bulk loading: skip DBs whose embed model
             // produced a different vector size (e.g. bge-m3 → 1024-dim vs 384-dim here).
@@ -157,10 +225,10 @@ public class KbDataService {
                 if (rs.next()) {
                     byte[] probe = rs.getBytes("vector");
                     int probeLen = probe == null ? 0 : probe.length;
-                    if (probeLen != dim() * 4) {
+                    if (probeLen != dim() * FLOAT_BYTES) {
                         log.warn("DB[{}] vector byte-length {} ≠ expected {} (dim={}). " +
                                 "Dense search disabled for this DB; BM25 still active.",
-                                dbIdx, probeLen, dim() * 4, dim());
+                                dbIdx, probeLen, dim() * FLOAT_BYTES, dim());
                         continue;
                     }
                 }
@@ -185,10 +253,12 @@ public class KbDataService {
             l2Normalize(v);
             System.arraycopy(v, 0, flat, i * d, d);
         }
-        this.chunkIds     = idArr;
-        this.allEmbeddings = flat;
-        log.info("{} vectors loaded from {} DB(s), L2-normalised ({} MB RAM)",
-                String.format("%,d", n), connections.size(), (n * d * 4) / 1_000_000);
+        this.atomicChunkIds.set(idArr);
+        this.atomicEmbeddings.set(flat);
+        if (log.isInfoEnabled()) {
+            log.info("{} vectors loaded from {} DB(s), L2-normalised ({} MB RAM)",
+                    String.format("%,d", n), conns.size(), (n * d * FLOAT_BYTES) / 1_000_000);
+        }
     }
 
     private static void l2Normalize(float[] v) {
@@ -205,20 +275,21 @@ public class KbDataService {
         Map<String, Integer> counts = new HashMap<>();
         Map<String, String> docTypes = new HashMap<>();
         Map<String, NavigableMap<Integer, String>> chunkIndex = new HashMap<>();
-        for (int dbIdx = 0; dbIdx < connections.size(); dbIdx++) {
-            Connection conn = connections.get(dbIdx);
+        List<Connection> conns = connections();
+        for (int dbIdx = 0; dbIdx < conns.size(); dbIdx++) {
+            Connection conn = conns.get(dbIdx);
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery(
                          "SELECT id, spec_id, release, series, series_desc, doc_type, title, chunk_index FROM chunks")) {
                 while (rs.next()) {
                     String prefixed = dbIdx + ":" + rs.getString("id");
-                    String specId   = rs.getString("spec_id");
+                    String specId   = rs.getString(COL_SPEC_ID);
                     String docType  = rs.getString("doc_type");
                     int idx = parseChunkIndex(rs.getString("chunk_index"));
                     meta.put(prefixed, new ChunkMeta(
                             prefixed,
                             specId,
-                            rs.getString("release"),
+                            rs.getString(COL_RELEASE),
                             rs.getString("series"),
                             rs.getString("series_desc"),
                             docType,
@@ -233,11 +304,11 @@ public class KbDataService {
                 }
             }
         }
-        this.chunkMeta       = meta;
-        this.specChunkCounts = counts;
-        this.docTypeBySpecId = docTypes;
-        this.specChunkIndex  = chunkIndex;
-        long stubCount = counts.values().stream().filter(n -> n <= 2).count();
+        this.atomicChunkMeta.set(meta);
+        this.atomicSpecChunkCounts.set(counts);
+        this.atomicDocTypeBySpecId.set(docTypes);
+        this.atomicSpecChunkIndex.set(chunkIndex);
+        long stubCount = counts.values().stream().filter(n -> n <= STUB_LOG_MAX_CHUNKS).count();
         log.info("chunk metadata loaded: {} chunks across {} specs ({} are stubs ≤2 chunks)",
                 meta.size(), counts.size(), stubCount);
     }
@@ -273,23 +344,29 @@ public class KbDataService {
         Map<String, Integer> specCount = new HashMap<>();
         for (ScoredId id : scored) {
             if (out.size() >= topK) break;
-            ChunkMeta meta = chunkMeta.get(id.chunkId());
-            if (meta == null) continue;
-            if (specCount.merge(meta.specId(), 1, Integer::sum) > props.maxHybridPerSpec()) continue;
-            Connection conn = connections.get(dbOf(id.chunkId()));
-            try (PreparedStatement ps = conn.prepareStatement("SELECT text FROM chunks WHERE id=?")) {
-                ps.setString(1, realId(id.chunkId()));
-                try (ResultSet rs = ps.executeQuery()) {
-                    String text = rs.next() ? rs.getString("text") : "";
-                    if (looksBinary(text)) continue;
-                    double rounded = Math.round(id.score() * 10000.0d) / 10000.0d;
-                    out.add(new SearchHit(rounded, meta.specId(), meta.release(),
-                            meta.title(), meta.seriesDesc(), text == null ? "" : text,
-                            id.chunkId(), meta.docType(), 0, meta.chunkIndex()));
-                }
-            }
+            SearchHit hit = toDenseHit(id, specCount);
+            if (hit != null) out.add(hit);
         }
         return out;
+    }
+
+    /** One dense hit for {@link #search}; null when the chunk is filtered out. */
+    private SearchHit toDenseHit(ScoredId id, Map<String, Integer> specCount) throws SQLException {
+        ChunkMeta meta = chunkMeta().get(id.chunkId());
+        if (meta == null) return null;
+        if (specCount.merge(meta.specId(), 1, Integer::sum) > props.maxHybridPerSpec()) return null;
+        Connection conn = connections().get(dbOf(id.chunkId()));
+        try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_CHUNK_TEXT)) {
+            ps.setString(1, realId(id.chunkId()));
+            try (ResultSet rs = ps.executeQuery()) {
+                String text = rs.next() ? rs.getString("text") : "";
+                if (looksBinary(text)) return null;
+                double rounded = Math.round(id.score() * SCORE_ROUND_FACTOR) / SCORE_ROUND_FACTOR;
+                return new SearchHit(rounded, meta.specId(), meta.release(),
+                        meta.title(), meta.seriesDesc(), text == null ? "" : text,
+                        id.chunkId(), meta.docType(), 0, meta.chunkIndex());
+            }
+        }
     }
 
     /**
@@ -327,10 +404,9 @@ public class KbDataService {
      */
     public List<SearchHit> hybridSearch(
             String originalQuery, String expandedQuery, float[] queryVector, int topK,
-            String series, String release, String docType
+            SearchFilter filter
     ) throws SQLException {
-        return hybridSearch(originalQuery, expandedQuery, queryVector, topK,
-                series, release, docType, null);
+        return hybridSearch(originalQuery, expandedQuery, queryVector, topK, filter, null);
     }
 
     /**
@@ -344,10 +420,10 @@ public class KbDataService {
      */
     public List<SearchHit> hybridSearch(
             String originalQuery, String expandedQuery, float[] queryVector, int topK,
-            String series, String release, String docType, Integer maxPerSpecOverride
+            SearchFilter filter, Integer maxPerSpecOverride
     ) throws SQLException {
         return hybridSearchDetailed(originalQuery, expandedQuery, queryVector, topK,
-                series, release, docType, maxPerSpecOverride).hits();
+                filter, maxPerSpecOverride).hits();
     }
 
     /**
@@ -358,8 +434,11 @@ public class KbDataService {
      */
     public HybridResult hybridSearchDetailed(
             String originalQuery, String expandedQuery, float[] queryVector, int topK,
-            String series, String release, String docType, Integer maxPerSpecOverride
+            SearchFilter filter, Integer maxPerSpecOverride
     ) throws SQLException {
+        String series  = filter.series();
+        String release = filter.release();
+        String docType = filter.docType();
         // The candidate pool is deliberately INDEPENDENT of topK. Sizing it as
         // topK * mult meant topK changed WHICH documents were considered, not just
         // how many were returned: measured 2026-07-28 on "pseudowire down link
@@ -384,38 +463,15 @@ public class KbDataService {
         Set<String> denseTopSpecs = topSpecs(dense, props.agreementTopN());
         Set<String> bm25TopSpecs  = topSpecs(bm25,  props.agreementTopN());
 
-        // RRF fusion (Cormack et al.)
         final int rrfK = props.rrfK();
-        Map<String, Double> rrf = new LinkedHashMap<>();
-        for (int r = 0; r < dense.size(); r++)
-            rrf.merge(dense.get(r).chunkId(), 1.0 / (rrfK + r + 1), Double::sum);
-        for (int r = 0; r < bm25.size(); r++)
-            rrf.merge(bm25.get(r).chunkId(), 1.0 / (rrfK + r + 1), Double::sum);
-
-        // Co-occurrence bonus: boost chunks both retrievers agree on
-        Set<String> denseTop = dense.stream().limit(10).map(ScoredId::chunkId).collect(Collectors.toSet());
-        Set<String> bm25Top  = bm25.stream().limit(10).map(ScoredId::chunkId).collect(Collectors.toSet());
-        final double coOccurrenceBoost = props.coOccurrenceBoost();
-        rrf.replaceAll((id, score) ->
-                denseTop.contains(id) && bm25Top.contains(id) ? score * coOccurrenceBoost : score);
-
-        // Study-report and extras-DB discounts applied after co-occurrence boost.
-        // Study reports discuss topics more densely than the normative TS, so they
-        // outrank the authoritative spec in BM25 unless penalised. Source of truth
-        // for TR detection is the DB doc_type column; spec_id range is fallback.
-        Map<String, ChunkMeta> metaForDiscount = chunkMeta;
+        Map<String, Double> rrf = fuseWithRrf(dense, bm25, rrfK);
+        applyCoOccurrenceBoost(rrf, dense, bm25);
         final double extrasWeight = extrasDbWeightFor(originalQuery, series);
         final double studyReportDiscount = props.studyReportDiscount();
-        rrf.replaceAll((id, score) -> {
-            double s = score;
-            ChunkMeta m = metaForDiscount == null ? null : metaForDiscount.get(id);
-            if (m != null && isStudyReport(m)) s *= studyReportDiscount;
-            if (id.startsWith("1:"))           s *= extrasWeight;
-            return s;
-        });
+        applyRrfDiscounts(rrf, extrasWeight, studyReportDiscount);
 
         // maxRrf = theoretical max score for item ranked #1 in both lists (no boost)
-        double maxRrf = 2.0 / (rrfK + 1);
+        double maxRrf = RRF_LIST_COUNT / (rrfK + 1);
 
         List<Map.Entry<String, Double>> sorted = new ArrayList<>(rrf.entrySet());
         sorted.sort(Map.Entry.<String, Double>comparingByValue().reversed());
@@ -428,45 +484,9 @@ public class KbDataService {
         int perSpecCap       = useReranker ? props.maxRerankPerSpec() : props.maxHybridPerSpec();
         if (maxPerSpecOverride != null) perSpecCap = Math.max(perSpecCap, maxPerSpecOverride);
 
-        List<SearchHit> out = new ArrayList<>(targetPool);
-        Map<String, Integer> specCount = new HashMap<>();
-
-        for (Map.Entry<String, Double> e : sorted) {
-            if (out.size() >= targetPool) break;
-            String prefixedId = e.getKey();
-            ChunkMeta meta = chunkMeta.get(prefixedId);
-            if (meta == null) continue;
-
-            // Per-spec diversity cap
-            if (specCount.merge(meta.specId(), 1, Integer::sum) > perSpecCap) continue;
-
-            // Normalize: cap at 1.0 (boosted items can exceed raw maxRrf)
-            double normalized = Math.min(1.0, e.getValue() / maxRrf);
-
-            // Score threshold: drop results below noise floor
-            if (normalized < props.minResultScore()) continue;
-
-            Connection conn = connections.get(dbOf(prefixedId));
-            try (PreparedStatement ps = conn.prepareStatement("SELECT text FROM chunks WHERE id=?")) {
-                ps.setString(1, realId(prefixedId));
-                try (ResultSet rs = ps.executeQuery()) {
-                    String text = rs.next() ? rs.getString("text") : "";
-                    if (looksBinary(text)) continue;
-                    // Stub suppression: drop registered-but-not-really-ingested specs
-                    // unless the user named the spec explicitly. See isStubSpec().
-                    if (isStubSpec(meta.specId(), text) &&
-                            !queryMentionsSpec(originalQuery, meta.specId())) {
-                        continue;
-                    }
-                    double rounded = Math.round(normalized * 10000.0d) / 10000.0d;
-                    int support = (denseTopSpecs.contains(meta.specId()) ? 1 : 0)
-                                + (bm25TopSpecs.contains(meta.specId())  ? 1 : 0);
-                    out.add(new SearchHit(rounded, meta.specId(), meta.release(),
-                            meta.title(), meta.seriesDesc(), text == null ? "" : text,
-                            prefixedId, meta.docType(), support, meta.chunkIndex()));
-                }
-            }
-        }
+        FusedHitContext ctx = new FusedHitContext(perSpecCap, maxRrf, originalQuery,
+                denseTopSpecs, bm25TopSpecs);
+        List<SearchHit> out = collectFusedHits(sorted, targetPool, ctx);
 
         // Stage 2: cross-encoder reranking over the candidate pool.
         //
@@ -477,38 +497,145 @@ public class KbDataService {
         // props.maxRerankPerSpec cap to give the reranker more candidates to choose
         // from.
         if (useReranker) {
-            List<SearchHit> reranked = rerankService.rerank(originalQuery, out, out.size());
-            List<SearchHit> adjusted = new ArrayList<>(reranked.size());
-            Map<String, String> docTypes = docTypeBySpecId;
-            // Release implied by the query text ("Rel-18", "Release 18"), used only
-            // when the caller did NOT pass an explicit release filter — with a hard
-            // filter every surviving hit already matches, so a boost would be a no-op.
-            String impliedRelease = (release == null || release.isBlank())
-                    ? releaseFromQuery(originalQuery) : null;
-            for (SearchHit h : reranked) {
-                double s = h.score();
-                String hitDocType = docTypes == null ? null : docTypes.get(h.specId());
-                if (isStudyReportByDocType(hitDocType, h.specId())
-                        || isStudyReportByTitle(h.title())) s *= studyReportDiscount;
-                if (!isThreeGppSpecId(h.specId()))                  s *= extrasWeight;
-                if (impliedRelease != null) {
-                    s *= impliedRelease.equalsIgnoreCase(h.release())
-                            ? props.releaseMatchBoost()
-                            : props.releaseMismatchDiscount();
-                }
-                adjusted.add(h.withScore(Math.round(s * 10000.0) / 10000.0));
-            }
-            adjusted.sort((a, b) -> Double.compare(b.score(), a.score()));
-
-            // Final per-spec cap (post-rerank): prevent duplicate-spec runs in output.
-            // The pre-rerank pool used props.maxRerankPerSpec to give the reranker more
-            // candidates per spec to choose from; the final output uses the tighter cap.
-            int finalCap = maxPerSpecOverride != null
-                    ? Math.max(1, maxPerSpecOverride)
-                    : props.maxHybridPerSpec();
-            return applyFinalPerSpecCap(adjusted, topK, finalCap);
+            return rerankAndCap(originalQuery, out, topK, maxPerSpecOverride, release,
+                    extrasWeight, studyReportDiscount);
         }
         return new HybridResult(out, Map.of());
+    }
+
+    /** RRF fusion (Cormack et al.) of the dense and BM25 rank lists. */
+    private static Map<String, Double> fuseWithRrf(List<ScoredId> dense, List<ScoredId> bm25, int rrfK) {
+        Map<String, Double> rrf = new LinkedHashMap<>();
+        for (int r = 0; r < dense.size(); r++)
+            rrf.merge(dense.get(r).chunkId(), 1.0 / (rrfK + r + 1), Double::sum);
+        for (int r = 0; r < bm25.size(); r++)
+            rrf.merge(bm25.get(r).chunkId(), 1.0 / (rrfK + r + 1), Double::sum);
+        return rrf;
+    }
+
+    /** Co-occurrence bonus: boost chunks both retrievers agree on. */
+    private void applyCoOccurrenceBoost(Map<String, Double> rrf, List<ScoredId> dense, List<ScoredId> bm25) {
+        Set<String> denseTop = dense.stream().limit(CO_OCCURRENCE_TOP_N)
+                .map(ScoredId::chunkId).collect(Collectors.toSet());
+        Set<String> bm25Top  = bm25.stream().limit(CO_OCCURRENCE_TOP_N)
+                .map(ScoredId::chunkId).collect(Collectors.toSet());
+        final double coOccurrenceBoost = props.coOccurrenceBoost();
+        rrf.replaceAll((id, score) ->
+                denseTop.contains(id) && bm25Top.contains(id) ? score * coOccurrenceBoost : score);
+    }
+
+    /**
+     * Study-report and extras-DB discounts applied after co-occurrence boost.
+     * Study reports discuss topics more densely than the normative TS, so they
+     * outrank the authoritative spec in BM25 unless penalised. Source of truth
+     * for TR detection is the DB doc_type column; spec_id range is fallback.
+     */
+    private void applyRrfDiscounts(Map<String, Double> rrf, double extrasWeight, double studyReportDiscount) {
+        Map<String, ChunkMeta> metaForDiscount = chunkMeta();
+        rrf.replaceAll((id, score) -> {
+            double s = score;
+            ChunkMeta m = metaForDiscount == null ? null : metaForDiscount.get(id);
+            if (m != null && isStudyReport(m)) s *= studyReportDiscount;
+            if (id.startsWith("1:"))           s *= extrasWeight;
+            return s;
+        });
+    }
+
+    /** Read-only context shared by every fused-hit materialisation in one query. */
+    private record FusedHitContext(int perSpecCap, double maxRrf, String originalQuery,
+                                   Set<String> denseTopSpecs, Set<String> bm25TopSpecs) {}
+
+    private List<SearchHit> collectFusedHits(List<Map.Entry<String, Double>> sorted,
+                                             int targetPool, FusedHitContext ctx) throws SQLException {
+        List<SearchHit> out = new ArrayList<>(targetPool);
+        Map<String, Integer> specCount = new HashMap<>();
+        for (Map.Entry<String, Double> e : sorted) {
+            if (out.size() >= targetPool) break;
+            SearchHit hit = toFusedHit(e, specCount, ctx);
+            if (hit != null) out.add(hit);
+        }
+        return out;
+    }
+
+    /** One fused hit for {@link #hybridSearchDetailed}; null when the chunk is filtered out. */
+    private SearchHit toFusedHit(Map.Entry<String, Double> e, Map<String, Integer> specCount,
+                                 FusedHitContext ctx) throws SQLException {
+        String prefixedId = e.getKey();
+        ChunkMeta meta = chunkMeta().get(prefixedId);
+        if (meta == null) return null;
+
+        // Per-spec diversity cap
+        if (specCount.merge(meta.specId(), 1, Integer::sum) > ctx.perSpecCap()) return null;
+
+        // Normalize: cap at 1.0 (boosted items can exceed raw maxRrf)
+        double normalized = Math.min(1.0, e.getValue() / ctx.maxRrf());
+
+        // Score threshold: drop results below noise floor
+        if (normalized < props.minResultScore()) return null;
+
+        Connection conn = connections().get(dbOf(prefixedId));
+        try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_CHUNK_TEXT)) {
+            ps.setString(1, realId(prefixedId));
+            try (ResultSet rs = ps.executeQuery()) {
+                String text = rs.next() ? rs.getString("text") : "";
+                if (looksBinary(text)) return null;
+                // Stub suppression: drop registered-but-not-really-ingested specs
+                // unless the user named the spec explicitly. See isStubSpec().
+                if (isStubSpec(meta.specId(), text) &&
+                        !queryMentionsSpec(ctx.originalQuery(), meta.specId())) {
+                    return null;
+                }
+                double rounded = Math.round(normalized * SCORE_ROUND_FACTOR) / SCORE_ROUND_FACTOR;
+                int support = (ctx.denseTopSpecs().contains(meta.specId()) ? 1 : 0)
+                            + (ctx.bm25TopSpecs().contains(meta.specId())  ? 1 : 0);
+                return new SearchHit(rounded, meta.specId(), meta.release(),
+                        meta.title(), meta.seriesDesc(), text == null ? "" : text,
+                        prefixedId, meta.docType(), support, meta.chunkIndex());
+            }
+        }
+    }
+
+    /** Stage-2 reranking: re-apply discounts to reranker output, sort, apply final cap. */
+    private HybridResult rerankAndCap(String originalQuery, List<SearchHit> pool, int topK,
+                                      Integer maxPerSpecOverride, String release,
+                                      double extrasWeight, double studyReportDiscount) {
+        List<SearchHit> reranked = rerankService.rerank(originalQuery, pool, pool.size());
+        List<SearchHit> adjusted = new ArrayList<>(reranked.size());
+        Map<String, String> docTypes = atomicDocTypeBySpecId.get();
+        // Release implied by the query text ("Rel-18", "Release 18"), used only
+        // when the caller did NOT pass an explicit release filter — with a hard
+        // filter every surviving hit already matches, so a boost would be a no-op.
+        String impliedRelease = (release == null || release.isBlank())
+                ? releaseFromQuery(originalQuery) : null;
+        for (SearchHit h : reranked) {
+            adjusted.add(adjustRerankedScore(h, docTypes, impliedRelease,
+                    extrasWeight, studyReportDiscount));
+        }
+        adjusted.sort((a, b) -> Double.compare(b.score(), a.score()));
+
+        // Final per-spec cap (post-rerank): prevent duplicate-spec runs in output.
+        // The pre-rerank pool used props.maxRerankPerSpec to give the reranker more
+        // candidates per spec to choose from; the final output uses the tighter cap.
+        int finalCap = maxPerSpecOverride != null
+                ? Math.max(1, maxPerSpecOverride)
+                : props.maxHybridPerSpec();
+        return applyFinalPerSpecCap(adjusted, topK, finalCap);
+    }
+
+    private SearchHit adjustRerankedScore(SearchHit h, Map<String, String> docTypes,
+                                          String impliedRelease,
+                                          double extrasWeight, double studyReportDiscount) {
+        double s = h.score();
+        String hitDocType = docTypes == null ? null : docTypes.get(h.specId());
+        if (isStudyReportByDocType(hitDocType, h.specId())
+                || isStudyReportByTitle(h.title())) s *= studyReportDiscount;
+        if (!isThreeGppSpecId(h.specId()))                  s *= extrasWeight;
+        if (impliedRelease != null) {
+            s *= impliedRelease.equalsIgnoreCase(h.release())
+                    ? props.releaseMatchBoost()
+                    : props.releaseMismatchDiscount();
+        }
+        return h.withScore(Math.round(s * SCORE_ROUND_FACTOR) / SCORE_ROUND_FACTOR);
     }
 
     /**
@@ -531,9 +658,9 @@ public class KbDataService {
                 capDrops.merge(h.specId(), new CapDrop(h.specId(), 1, h.score()),
                         (prev, now) -> new CapDrop(h.specId(), prev.droppedCount() + 1,
                                 Math.max(prev.droppedTopScore(), now.droppedTopScore())));
-                continue;
+            } else {
+                capped.add(h);
             }
-            capped.add(h);
         }
         return new HybridResult(capped, capDrops);
     }
@@ -565,7 +692,7 @@ public class KbDataService {
 
     public AdjacentContext adjacentContext(SearchHit hit, int previewChars) throws SQLException {
         if (hit.chunkIndex() < 0) return new AdjacentContext(null, null);
-        Map<String, NavigableMap<Integer, String>> idx = specChunkIndex;
+        Map<String, NavigableMap<Integer, String>> idx = atomicSpecChunkIndex.get();
         NavigableMap<Integer, String> bySpec = idx == null ? null : idx.get(hit.specId());
         if (bySpec == null) return new AdjacentContext(null, null);
         String beforeId = bySpec.get(hit.chunkIndex() - 1);
@@ -576,8 +703,8 @@ public class KbDataService {
     }
 
     private String fetchChunkText(String prefixedId) throws SQLException {
-        Connection conn = connections.get(dbOf(prefixedId));
-        try (PreparedStatement ps = conn.prepareStatement("SELECT text FROM chunks WHERE id=?")) {
+        Connection conn = connections().get(dbOf(prefixedId));
+        try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_CHUNK_TEXT)) {
             ps.setString(1, realId(prefixedId));
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
@@ -603,7 +730,7 @@ public class KbDataService {
 
     /** Distinct spec IDs among a retriever's own top-N chunks. */
     private Set<String> topSpecs(List<ScoredId> ranked, int topN) {
-        Map<String, ChunkMeta> metaMap = chunkMeta;
+        Map<String, ChunkMeta> metaMap = chunkMeta();
         Set<String> out = new HashSet<>();
         if (metaMap == null) return out;
         int n = Math.min(topN, ranked.size());
@@ -688,14 +815,14 @@ public class KbDataService {
             level = "none";
         } else if (margin >= props.confidenceHighMargin()) {
             level = "high";
-        } else if (support >= 2) {
+        } else if (support >= FULL_RETRIEVER_SUPPORT) {
             level = "medium";
         } else {
             level = "low";
         }
         return new RetrievalConfidence(level,
-                Math.round(margin * 1000.0) / 1000.0,
-                Math.round(top * 1000.0) / 1000.0,
+                Math.round(margin * CONFIDENCE_ROUND_FACTOR) / CONFIDENCE_ROUND_FACTOR,
+                Math.round(top * CONFIDENCE_ROUND_FACTOR) / CONFIDENCE_ROUND_FACTOR,
                 (int) specs, support);
     }
 
@@ -722,7 +849,47 @@ public class KbDataService {
      * OR source = full expandedQuery for recall when AND is too narrow.
      */
     private List<ScoredId> bm25TopK(String originalQuery, String expandedQuery, int k,
-                                     String series, String release, String docType) throws SQLException {
+                                     String series, String release, String docType) {
+        Set<String> pinned = andSubstTargets(originalQuery);
+        FtsQueries queries = buildFtsQueries(originalQuery, expandedQuery, pinned);
+
+        if (queries.andFts().isBlank() && queries.orFts().isBlank()) return List.of();
+
+        boolean hasFilter = (series  != null && !series.isBlank())
+                         || (release != null && !release.isBlank())
+                         || (docType != null && !docType.isBlank());
+        // Oversample when filtering so enough candidates survive the in-memory filter.
+        int fetch = hasFilter ? Math.min(k * FILTER_OVERSAMPLE_FACTOR, props.maxHybridCandidates()) : k;
+
+        Map<String, ChunkMeta> metaMap = chunkMeta();
+        List<ScoredId> all = new ArrayList<>();
+
+        for (int dbIdx = 0; dbIdx < connections().size(); dbIdx++) {
+            all.addAll(bm25ForDb(dbIdx, queries, fetch, originalQuery, series));
+        }
+
+        // Apply series / release / doc-type filters in memory (avoids a JOIN on the FTS5 table)
+        if (hasFilter && metaMap != null) {
+            all = all.stream()
+                    .filter(s -> {
+                        ChunkMeta m = metaMap.get(s.chunkId());
+                        return m != null
+                                && filterMatches(series,  m.series())
+                                && filterMatches(release, m.release())
+                                && filterMatches(docType, m.docType());
+                    })
+                    .collect(Collectors.toList());
+        }
+
+        all.sort((a, b) -> Float.compare(b.score(), a.score()));
+        return all.size() > k ? all.subList(0, k) : all;
+    }
+
+    /**
+     * AND source assembly: substituted original terms + digit expansions +
+     * short hyphenated expansions (see {@link #bm25TopK}'s javadoc).
+     */
+    private String buildAndSource(String originalQuery, String expandedQuery) {
         // Apply AND-path term substitutions before building the AND query.
         // E.g. "volte" → "mmtel" because 23.228 uses "MMTel" not "VoLTE" in its text.
         Set<String> origTermSet = new HashSet<>(extractFtsTerms(originalQuery));
@@ -733,10 +900,11 @@ public class KbDataService {
         // non-hyphen terms: those queries are already specific enough, and adding "4g"
         // would exclude IMS specs (23.228) that pre-date the "4G" label.
         long shortOrigTerms = origTermSet.stream()
-                .filter(t -> !t.chars().anyMatch(Character::isDigit) && !t.contains("-") && t.length() <= 6)
+                .filter(t -> !t.chars().anyMatch(Character::isDigit) && !t.contains("-")
+                        && t.length() <= SHORT_TERM_MAX_LENGTH)
                 .count();
         String digitExpansions = "";
-        if (shortOrigTerms < 4) {
+        if (shortOrigTerms < SPECIFIC_QUERY_SHORT_TERM_COUNT) {
             digitExpansions = extractFtsTerms(expandedQuery).stream()
                     .filter(t -> t.chars().anyMatch(Character::isDigit) && !origTermSet.contains(t))
                     .collect(Collectors.joining(" "));
@@ -747,14 +915,21 @@ public class KbDataService {
         // Length cap ≤6 prevents noise from long compound forms like "non-access" (from NAS) or
         // "multi-user" (from MU-MIMO) which would over-constrain the AND predicate.
         String hyphenatedExpansions = extractFtsTerms(expandedQuery).stream()
-                .filter(t -> t.contains("-") && t.length() <= 6 && !origTermSet.contains(t))
+                .filter(t -> t.contains("-") && t.length() <= SHORT_TERM_MAX_LENGTH
+                        && !origTermSet.contains(t))
                 .collect(Collectors.joining(" "));
-        String andSource = Stream.of(substitutedOriginal, digitExpansions, hyphenatedExpansions)
+        return Stream.of(substitutedOriginal, digitExpansions, hyphenatedExpansions)
                 .filter(s -> !s.isBlank())
                 .collect(Collectors.joining(" "));
+    }
 
+    /** The four FTS query strings one BM25 retrieval works through, in order. */
+    /**
+     * Assembles the four FTS5 query strings tried in order by {@link #bm25ForDb}.
+     */
+    private FtsQueries buildFtsQueries(String originalQuery, String expandedQuery, Set<String> pinned) {
+        String andSource = buildAndSource(originalQuery, expandedQuery);
         int andTermLimit = props.andTermLimit();
-        Set<String> pinned = andSubstTargets(originalQuery);
         String andFts = buildAndFtsQuery(andSource, andTermLimit, pinned);
         // Progressive relaxation: if the full AND returns nothing, try with one fewer term.
         // Example: Q38 "VoLTE IMS bearer" → AND("p-cscf","s-cscf","ims","lte") = 0 hits in 23.228,
@@ -780,65 +955,46 @@ public class KbDataService {
         String orSource = pinned.isEmpty()
                 ? expandedQuery
                 : expandedQuery + " " + String.join(" ", pinned);
-        String orFts  = buildOrFtsQuery(orSource);
+        return new FtsQueries(andFts, andFtsRelaxed, andFtsPinned, buildOrFtsQuery(orSource));
+    }
 
-        if (andFts.isBlank() && orFts.isBlank()) return List.of();
+    private record FtsQueries(String andFts, String andFtsRelaxed, String andFtsPinned, String orFts) {}
 
-        boolean hasFilter = (series  != null && !series.isBlank())
-                         || (release != null && !release.isBlank())
-                         || (docType != null && !docType.isBlank());
-        // Oversample when filtering so enough candidates survive the in-memory filter.
-        int fetch = hasFilter ? Math.min(k * 10, props.maxHybridCandidates()) : k;
+    /** BM25 retrieval against one DB: AND → relaxed AND → pinned AND → (conditional) OR. */
+    private List<ScoredId> bm25ForDb(int dbIdx, FtsQueries q, int fetch,
+                                     String originalQuery, String series) {
+        Connection conn = connections().get(dbIdx);
+        List<ScoredId> results = List.of();
 
-        Map<String, ChunkMeta> metaMap = chunkMeta;
-        List<ScoredId> all = new ArrayList<>();
-
-        for (int dbIdx = 0; dbIdx < connections.size(); dbIdx++) {
-            Connection conn = connections.get(dbIdx);
-            List<ScoredId> results = List.of();
-
-            if (!andFts.isBlank()) {
-                results = bm25TopKFromConn(conn, dbIdx, andFts, fetch);
-                // Progressive relaxation: AND(limit) returned nothing → try AND(limit-1).
-                // Handles cases like Q38 where the target spec lacks one AND term per-chunk
-                // (e.g. 23.228 has mmtel+ims+lte together but not with "voice" in one chunk).
-                if (results.isEmpty() && !andFtsRelaxed.isBlank()) {
-                    results = bm25TopKFromConn(conn, dbIdx, andFtsRelaxed, fetch);
-                }
-                // Vendor-alias floor: the canonical IE terms on their own.
-                if (results.isEmpty() && !andFtsPinned.isBlank()) {
-                    results = bm25TopKFromConn(conn, dbIdx, andFtsPinned, fetch);
-                }
+        if (!q.andFts().isBlank()) {
+            results = bm25TopKFromConn(conn, dbIdx, q.andFts(), fetch);
+            // Progressive relaxation: AND(limit) returned nothing → try AND(limit-1).
+            // Handles cases like Q38 where the target spec lacks one AND term per-chunk
+            // (e.g. 23.228 has mmtel+ims+lte together but not with "voice" in one chunk).
+            if (results.isEmpty() && !q.andFtsRelaxed().isBlank()) {
+                results = bm25TopKFromConn(conn, dbIdx, q.andFtsRelaxed(), fetch);
             }
-            // Fall back to OR only when both AND queries return nothing.
-            // Extras DB (dbIdx > 0) gets OR fallback ONLY when the query has explicit
-            // non-3GPP intent (ospf, bfd, rfc, ietf, etc.) — this allows RFC 5880 to
-            // be retrieved via OR when its chunks lack multi-term co-occurrence required
-            // by AND. Without this, OSPF/BFD queries never surface RFC 5880 via BM25.
-            boolean extrasOrAllowed = dbIdx > 0
-                    && extrasDbWeightFor(originalQuery, series) >= props.extrasDbNeutralWeight();
-            if (results.isEmpty() && !orFts.isBlank() && (dbIdx == 0 || extrasOrAllowed)) {
-                results = bm25TopKFromConn(conn, dbIdx, orFts, fetch);
+            // Vendor-alias floor: the canonical IE terms on their own.
+            if (results.isEmpty() && !q.andFtsPinned().isBlank()) {
+                results = bm25TopKFromConn(conn, dbIdx, q.andFtsPinned(), fetch);
             }
-            all.addAll(results);
         }
-
-        // Apply series / release / doc-type filters in memory (avoids a JOIN on the FTS5 table)
-        if (hasFilter && metaMap != null) {
-            all = all.stream()
-                    .filter(s -> {
-                        ChunkMeta m = metaMap.get(s.chunkId());
-                        if (m == null) return false;
-                        if (series  != null && !series.isBlank()  && !series.equals(m.series()))   return false;
-                        if (release != null && !release.isBlank() && !release.equals(m.release())) return false;
-                        if (docType != null && !docType.isBlank() && !docType.equals(m.docType())) return false;
-                        return true;
-                    })
-                    .collect(Collectors.toList());
+        // Fall back to OR only when both AND queries return nothing.
+        // Extras DB (dbIdx > 0) gets OR fallback ONLY when the query has explicit
+        // non-3GPP intent (ospf, bfd, rfc, ietf, etc.) — this allows RFC 5880 to
+        // be retrieved via OR when its chunks lack multi-term co-occurrence required
+        // by AND. Without this, OSPF/BFD queries never surface RFC 5880 via BM25.
+        boolean extrasOrAllowed = dbIdx > 0
+                && extrasDbWeightFor(originalQuery, series) >= props.extrasDbNeutralWeight();
+        if (results.isEmpty() && !q.orFts().isBlank() && (dbIdx == 0 || extrasOrAllowed)) {
+            results = bm25TopKFromConn(conn, dbIdx, q.orFts(), fetch);
         }
+        return results;
+    }
 
-        all.sort((a, b) -> Float.compare(b.score(), a.score()));
-        return all.size() > k ? all.subList(0, k) : all;
+    /** True when the filter is unset (null/blank) or equals the chunk's value. */
+    private static boolean filterMatches(String filter, String value) {
+        return filter == null || filter.isBlank() || filter.equals(value);
     }
 
     /**
@@ -871,7 +1027,7 @@ public class KbDataService {
                         .thenComparingInt(KbDataService::termSpecificity)
                         .thenComparingInt(String::length)
                         .thenComparing(Comparator.naturalOrder()))
-                .collect(Collectors.toList());
+                .toList();
 
         // Expand limit when digit-containing terms (n1, n2, 5g …) exceed the base limit.
         // These terms all share specificity score 0 and are often tied in length, so the
@@ -879,7 +1035,7 @@ public class KbDataService {
         // "n1 n2 n3 n4"). Including all digit terms (capped at 6) avoids that loss.
         int digitTerms = (int) sorted.stream()
                 .filter(t -> t.chars().anyMatch(Character::isDigit)).count();
-        int limit = digitTerms > baseLimit ? Math.min(digitTerms, 6) : baseLimit;
+        int limit = digitTerms > baseLimit ? Math.min(digitTerms, MAX_DIGIT_AND_TERMS) : baseLimit;
 
         // Scope AND terms to text+series_desc columns only (exclude title).
         // Including the title column gives specs with technology-branded titles
@@ -896,9 +1052,9 @@ public class KbDataService {
     private static int termSpecificity(String term) {
         if (term.chars().anyMatch(Character::isDigit)) return 0; // 5qi, 5g, e1, n2, f1-u
         if (term.contains("-"))                         return 1; // s-nssai, cu-cp, gtp-u
-        if (term.length() <= 6)                         return 2; // nssai, rach, pdcp, qos
-        if (term.length() <= 9)                         return 3; // slicing, bearer, handover
-        return 4;                                                  // information, assistance (expansion noise)
+        if (term.length() <= SHORT_TERM_MAX_LENGTH)     return SPECIFICITY_SHORT;  // nssai, rach, pdcp, qos
+        if (term.length() <= MEDIUM_TERM_MAX_LENGTH)    return SPECIFICITY_MEDIUM; // slicing, bearer, handover
+        return SPECIFICITY_LONG;                                   // information, assistance (expansion noise)
     }
 
     /** OR fallback: any matching term qualifies a chunk. */
@@ -930,7 +1086,7 @@ public class KbDataService {
         Map<String, String> subst = lexicon.andTermSubst();
         return Arrays.stream(query.split("\\s+"))
                 .map(tok -> {
-                    String t = tok.replaceAll("[^A-Za-z0-9-]", "").toLowerCase();
+                    String t = tok.replaceAll(NON_TERM_CHARS_RE, "").toLowerCase();
                     return subst.getOrDefault(t, t);
                 })
                 .collect(Collectors.joining(" "));
@@ -946,7 +1102,7 @@ public class KbDataService {
         Map<String, String> subst = lexicon.andTermSubst();
         Set<String> out = new LinkedHashSet<>();
         for (String tok : query.split("\\s+")) {
-            String t = tok.replaceAll("[^A-Za-z0-9-]", "").toLowerCase();
+            String t = tok.replaceAll(NON_TERM_CHARS_RE, "").toLowerCase();
             String canonical = subst.get(t);
             if (canonical != null) out.addAll(extractFtsTerms(canonical));
         }
@@ -957,10 +1113,10 @@ public class KbDataService {
         if (query == null) return List.of();
         Set<String> stopWords = lexicon.stopWords();
         return Arrays.stream(query.split("\\s+"))
-                .map(t -> t.replaceAll("[^A-Za-z0-9-]", "").toLowerCase())
-                .filter(t -> t.length() >= 2 && !stopWords.contains(t))
+                .map(t -> t.replaceAll(NON_TERM_CHARS_RE, "").toLowerCase())
+                .filter(t -> t.length() >= MIN_FTS_TERM_LENGTH && !stopWords.contains(t))
                 .distinct()
-                .collect(Collectors.toList());
+                .toList();
     }
 
     /**
@@ -1036,7 +1192,7 @@ public class KbDataService {
         String q = originalQuery.toLowerCase();
         for (String term : lexicon.non3gppIntentTerms()) {
             // word-boundary match for short terms to avoid e.g. "ip" matching inside "description"
-            if (term.length() <= 3) {
+            if (term.length() <= SHORT_INTENT_TERM_MAX_LENGTH) {
                 if (containsWord(q, term)) return props.extrasDbNeutralWeight();
             } else {
                 if (q.contains(term)) return props.extrasDbNeutralWeight();
@@ -1067,7 +1223,7 @@ public class KbDataService {
         List<ScoredId> out = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, fts);
-            ps.setObject(2, k);
+            ps.setObject(SECOND_SQL_PARAM, k);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String id = rs.getString("id");
@@ -1093,35 +1249,47 @@ public class KbDataService {
      */
     private List<ScoredId> cosineTopK(float[] qvec, int k,
                                        String series, String release, String docType) {
-        String[]              ids       = chunkIds;
-        float[]               embeddings = allEmbeddings;
-        Map<String, ChunkMeta> metaMap  = chunkMeta;
+        String[]              ids       = atomicChunkIds.get();
+        float[]               embeddings = atomicEmbeddings.get();
+        Map<String, ChunkMeta> metaMap  = chunkMeta();
         if (ids == null || embeddings == null || metaMap == null) return List.of();
 
-        int d = dim();
         int maxDensePerSpec = props.maxDensePerSpec();
+        List<ScoredId> results = scoreAllChunks(qvec, ids, embeddings, metaMap,
+                series, release, docType);
+        results.sort((a, b) -> Float.compare(b.score(), a.score()));
+        return capPerSpec(results, metaMap, k, maxDensePerSpec);
+    }
+
+    /** Full-scan cosine scoring over the in-RAM index, applying the metadata filters. */
+    private List<ScoredId> scoreAllChunks(float[] qvec, String[] ids, float[] embeddings,
+                                          Map<String, ChunkMeta> metaMap,
+                                          String series, String release, String docType) {
+        int d = dim();
         List<ScoredId> results = new ArrayList<>();
         for (int i = 0; i < ids.length; i++) {
             String id   = ids[i];
             ChunkMeta m = metaMap.get(id);
-            if (m == null) continue;
-            if (series  != null && !series.isBlank()  && !series.equals(m.series()))   continue;
-            if (release != null && !release.isBlank() && !release.equals(m.release())) continue;
-            if (docType != null && !docType.isBlank() && !docType.equals(m.docType())) continue;
+            if (m == null
+                    || !filterMatches(series,  m.series())
+                    || !filterMatches(release, m.release())
+                    || !filterMatches(docType, m.docType())) continue;
             int off = i * d;
             float dot = 0f;
             for (int j = 0; j < d; j++) dot += qvec[j] * embeddings[off + j];
             results.add(new ScoredId(id, dot));
         }
-        results.sort((a, b) -> Float.compare(b.score(), a.score()));
+        return results;
+    }
 
-        // Per-spec cap: prevents one popular spec dominating the entire candidate pool
+    /** Per-spec cap: prevents one popular spec dominating the entire candidate pool. */
+    private static List<ScoredId> capPerSpec(List<ScoredId> results, Map<String, ChunkMeta> metaMap,
+                                             int k, int maxDensePerSpec) {
         Map<String, Integer> specHits = new HashMap<>();
         List<ScoredId> capped = new ArrayList<>(k);
         for (ScoredId s : results) {
             ChunkMeta m = metaMap.get(s.chunkId());
-            if (m == null) continue;
-            if (specHits.merge(m.specId(), 1, Integer::sum) <= maxDensePerSpec) {
+            if (m != null && specHits.merge(m.specId(), 1, Integer::sum) <= maxDensePerSpec) {
                 capped.add(s);
                 if (capped.size() >= k) break;
             }
@@ -1174,7 +1342,7 @@ public class KbDataService {
         Boolean cached = clauseIndexPresent;
         if (cached != null) return cached;
         boolean present = false;
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery(
                          "SELECT name FROM sqlite_master WHERE type='table' AND name='clauses'")) {
@@ -1204,78 +1372,65 @@ public class KbDataService {
         Pattern rx = ieDefinitionPattern(ie);
 
         List<IeDefinition> out = new ArrayList<>();
-        java.util.Set<String> seen = new HashSet<>();
-        for (Connection conn : connections) {
-            // LIKE prefilter first: full-table regex over 185k chunks would be slow,
-            // and the IE name is a rare token so this narrows hard.
-            StringBuilder sql = new StringBuilder(
-                    "SELECT spec_id, release, text FROM chunks WHERE text LIKE ?");
-            List<Object> params = new ArrayList<>();
-            params.add("%" + ie + "%");
-            if (series != null && !series.isBlank()) {
-                sql.append(" AND series=?");
-                params.add(series);
-            }
-            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next() && out.size() < limit) {
-                        String text = rs.getString("text");
-                        if (text == null || looksBinary(text)) continue;
-                        var m = rx.matcher(text);
-                        while (m.find() && out.size() < limit) {
-                            String name = m.group(1);
-                            String def  = m.group(2).replaceAll("\\s+", " ");
-                            String key  = rs.getString("spec_id") + "|" + name + "|" + def;
-                            if (!seen.add(key)) continue;
-                            int from = Math.max(0, m.start() - 160);
-                            String ctx = text.substring(from, Math.min(text.length(), m.end() + 60))
-                                    .replaceAll("\\s+", " ").strip();
-                            out.add(new IeDefinition(rs.getString("spec_id"), name, def,
-                                    rs.getString("release"), ctx));
-                        }
-                    }
-                }
-            }
+        Set<String> seen = new HashSet<>();
+        for (Connection conn : connections()) {
+            scanChunksForIe(conn, ie, series, rx, limit, out, seen);
         }
         return out;
     }
 
-    /** IE lookup against the clause-level index; empty when it has no match. */
-    private List<IeDefinition> lookupInClauses(String ie, String series, int limit)
+    /** Scan one DB's chunks table for ASN.1 definitions of {@code ie}. */
+    private void scanChunksForIe(Connection conn, String ie, String series, Pattern rx,
+                                 int limit, List<IeDefinition> out, Set<String> seen)
             throws SQLException {
+        // LIKE prefilter first: full-table regex over 185k chunks would be slow,
+        // and the IE name is a rare token so this narrows hard.
+        StringBuilder sql = new StringBuilder(
+                "SELECT spec_id, release, text FROM chunks WHERE text LIKE ?");
+        List<Object> params = new ArrayList<>();
+        params.add("%" + ie + "%");
+        if (series != null && !series.isBlank()) {
+            sql.append(" AND series=?");
+            params.add(series);
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next() && out.size() < limit) {
+                    String text = rs.getString("text");
+                    if (text == null || looksBinary(text)) continue;
+                    collectChunkIeMatches(rx, text, rs, limit, out, seen);
+                }
+            }
+        }
+    }
+
+    /** Collect every distinct IE-definition match inside one chunk's text. */
+    private void collectChunkIeMatches(Pattern rx, String text, ResultSet rs, int limit,
+                                       List<IeDefinition> out, Set<String> seen)
+            throws SQLException {
+        var m = rx.matcher(text);
+        while (m.find() && out.size() < limit) {
+            String name = m.group(1);
+            String def  = m.group(IE_DEF_GROUP).replaceAll("\\s+", " ");
+            String key  = rs.getString(COL_SPEC_ID) + "|" + name + "|" + def;
+            if (!seen.add(key)) continue;
+            int from = Math.max(0, m.start() - IE_CONTEXT_BEFORE_CHARS);
+            String ctx = text.substring(from, Math.min(text.length(), m.end() + IE_CONTEXT_AFTER_CHARS))
+                    .replaceAll("\\s+", " ").strip();
+            out.add(new IeDefinition(rs.getString(COL_SPEC_ID), name, def,
+                    rs.getString(COL_RELEASE), ctx));
+        }
+    }
+
+    /** IE lookup against the clause-level index; empty when it has no match. */
+    private List<IeDefinition> lookupInClauses(String ie, String series, int limit) {
         Pattern rx = ieDefinitionPattern(ie);
         List<IeDefinition> out = new ArrayList<>();
-        java.util.Set<String> seen = new HashSet<>();
-        for (Connection conn : connections) {
-            StringBuilder sql = new StringBuilder(
-                    "SELECT spec_id, release, clause_id, text FROM clauses WHERE text LIKE ?");
-            List<Object> params = new ArrayList<>();
-            params.add("%" + ie + "%");
-            if (series != null && !series.isBlank()) {
-                sql.append(" AND series=?");
-                params.add(series);
-            }
-            // Units whose ie_name IS this IE are the definition itself; rank them first.
-            sql.append(" ORDER BY CASE WHEN ie_name LIKE ? THEN 0 ELSE 1 END, length(text)");
-            params.add(ie + "%");
-            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-                for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next() && out.size() < limit) {
-                        String text = rs.getString("text");
-                        if (text == null) continue;
-                        var m = rx.matcher(text);
-                        while (m.find() && out.size() < limit) {
-                            String def = m.group(2).replaceAll("\\s+", " ");
-                            String key = rs.getString("spec_id") + "|" + m.group(1) + "|" + def;
-                            if (!seen.add(key)) continue;
-                            out.add(new IeDefinition(rs.getString("spec_id"), m.group(1), def,
-                                    rs.getString("release"),
-                                    text.replaceAll("\\s+", " ").strip()));
-                        }
-                    }
-                }
+        Set<String> seen = new HashSet<>();
+        for (Connection conn : connections()) {
+            try {
+                scanClausesForIe(conn, ie, series, rx, limit, out, seen);
             } catch (SQLException e) {
                 log.debug("clause lookup failed on one DB: {}", e.getMessage());
             }
@@ -1283,15 +1438,57 @@ public class KbDataService {
         return out;
     }
 
+    /** Scan one DB's clause-level index for ASN.1 definitions of {@code ie}. */
+    private void scanClausesForIe(Connection conn, String ie, String series, Pattern rx,
+                                  int limit, List<IeDefinition> out, Set<String> seen)
+            throws SQLException {
+        StringBuilder sql = new StringBuilder(
+                "SELECT spec_id, release, clause_id, text FROM clauses WHERE text LIKE ?");
+        List<Object> params = new ArrayList<>();
+        params.add("%" + ie + "%");
+        if (series != null && !series.isBlank()) {
+            sql.append(" AND series=?");
+            params.add(series);
+        }
+        // Units whose ie_name IS this IE are the definition itself; rank them first.
+        sql.append(" ORDER BY CASE WHEN ie_name LIKE ? THEN 0 ELSE 1 END, length(text)");
+        params.add(ie + "%");
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next() && out.size() < limit) {
+                    String text = rs.getString("text");
+                    if (text == null) continue;
+                    collectClauseIeMatches(rx, text, rs, limit, out, seen);
+                }
+            }
+        }
+    }
+
+    /** Collect every distinct IE-definition match inside one clause unit's text. */
+    private void collectClauseIeMatches(Pattern rx, String text, ResultSet rs, int limit,
+                                        List<IeDefinition> out, Set<String> seen)
+            throws SQLException {
+        var m = rx.matcher(text);
+        while (m.find() && out.size() < limit) {
+            String def = m.group(IE_DEF_GROUP).replaceAll("\\s+", " ");
+            String key = rs.getString(COL_SPEC_ID) + "|" + m.group(1) + "|" + def;
+            if (!seen.add(key)) continue;
+            out.add(new IeDefinition(rs.getString(COL_SPEC_ID), m.group(1), def,
+                    rs.getString(COL_RELEASE),
+                    text.replaceAll("\\s+", " ").strip()));
+        }
+    }
+
     // ── Spec / list queries ───────────────────────────────────────────────────
 
     public List<Map<String, Object>> getSpecChunks(String specId, int maxChunks) throws SQLException {
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             List<Map<String, Object>> rows = new ArrayList<>();
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT * FROM chunks WHERE spec_id=? ORDER BY chunk_index LIMIT ?")) {
                 ps.setString(1, specId);
-                ps.setInt(2, maxChunks);
+                ps.setInt(SECOND_SQL_PARAM, maxChunks);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) rows.add(rowMap(rs));
                 }
@@ -1325,15 +1522,15 @@ public class KbDataService {
         String fts = buildOrFtsQuery(query);
         if (fts.isBlank()) return getSpecChunks(specId, maxChunks);
 
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             List<Map<String, Object>> rows = new ArrayList<>();
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT c.* FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid "
                             + "WHERE f.chunks_fts MATCH ? AND c.spec_id = ? "
                             + "ORDER BY rank LIMIT ?")) {
                 ps.setString(1, fts);
-                ps.setString(2, specId);
-                ps.setInt(3, maxChunks);
+                ps.setString(SECOND_SQL_PARAM, specId);
+                ps.setInt(THIRD_SQL_PARAM, maxChunks);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) rows.add(rowMap(rs));
                 }
@@ -1349,13 +1546,13 @@ public class KbDataService {
 
     public List<Map<String, Object>> listSpecs(String series, String release) throws SQLException {
         Map<String, Map<String, Object>> bySpecId = new LinkedHashMap<>();
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             for (Map<String, Object> row : listSpecsFromConn(conn, series, release)) {
-                bySpecId.put((String) row.get("spec_id"), row);
+                bySpecId.put((String) row.get(COL_SPEC_ID), row);
             }
         }
         List<Map<String, Object>> out = new ArrayList<>(bySpecId.values());
-        out.sort(Comparator.comparing(m -> (String) m.get("spec_id")));
+        out.sort(Comparator.comparing(m -> (String) m.get(COL_SPEC_ID)));
         return out;
     }
 
@@ -1389,13 +1586,13 @@ public class KbDataService {
      * Used by {@link ScopeGateService} to decide which out-of-scope markers apply.
      */
     public Set<String> allSpecIds() {
-        Map<String, Integer> counts = specChunkCounts;
+        Map<String, Integer> counts = specChunkCounts();
         return counts == null ? Set.of() : Set.copyOf(counts.keySet());
     }
 
     public Set<String> indexedSeries() throws SQLException {
         Set<String> series = new HashSet<>();
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery("SELECT DISTINCT series FROM chunks")) {
                 while (rs.next()) series.add(rs.getString("series"));
@@ -1406,7 +1603,7 @@ public class KbDataService {
 
     public long totalChunks() throws SQLException {
         long total = 0;
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery("SELECT COUNT(*) AS n FROM chunks")) {
                 total += rs.next() ? rs.getLong("n") : 0L;
@@ -1417,10 +1614,10 @@ public class KbDataService {
 
     public long totalSpecs() throws SQLException {
         Set<String> specIds = new HashSet<>();
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery("SELECT DISTINCT spec_id FROM chunks")) {
-                while (rs.next()) specIds.add(rs.getString("spec_id"));
+                while (rs.next()) specIds.add(rs.getString(COL_SPEC_ID));
             }
         }
         return specIds.size();
@@ -1432,7 +1629,7 @@ public class KbDataService {
      * indexed corpus is actually substantive vs. registered-but-thin.
      */
     public long stubSpecCount() {
-        Map<String, Integer> counts = specChunkCounts;
+        Map<String, Integer> counts = specChunkCounts();
         if (counts == null) return 0L;
         int max = props.stubMaxChunksPerSpec();
         return counts.values().stream()
@@ -1442,7 +1639,7 @@ public class KbDataService {
 
     public String embedModelName() throws SQLException {
         String model = null;
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             String m = readMetaValue(conn, "embed_model");
             if (m == null) continue;
             if (model == null) {
@@ -1461,7 +1658,7 @@ public class KbDataService {
      */
     public int embedDimFromMeta() throws SQLException {
         int dim = 0;
-        for (Connection conn : connections) {
+        for (Connection conn : connections()) {
             String value = readMetaValue(conn, "embed_dim");
             if (value == null) continue;
             try {
@@ -1488,7 +1685,7 @@ public class KbDataService {
     }
 
     public int vectorCount() {
-        String[] ids = chunkIds;
+        String[] ids = atomicChunkIds.get();
         return ids == null ? 0 : ids.length;
     }
 
@@ -1509,8 +1706,9 @@ public class KbDataService {
      * pattern we want to suppress.
      */
     private boolean isStubSpec(String specId, String text) {
-        if (specChunkCounts == null) return false;
-        Integer count = specChunkCounts.get(specId);
+        Map<String, Integer> counts = specChunkCounts();
+        if (counts == null) return false;
+        Integer count = counts.get(specId);
         if (count == null) return false;
         if (count > props.stubMaxChunksPerSpec()) return false;
         int len = text == null ? 0 : text.length();
@@ -1560,19 +1758,20 @@ public class KbDataService {
 
     static boolean looksBinary(String text) {
         if (text == null || text.isBlank()) return true;
-        String s = text.length() > 600 ? text.substring(0, 600) : text;
+        String s = text.length() > BINARY_SNIFF_CHARS ? text.substring(0, BINARY_SNIFF_CHARS) : text;
         if (s.contains("EMF+") || s.contains("w:docVar") || s.contains("w:val=")) return true;
         int bad = 0;
         for (int i = 0; i < s.length(); i++) {
             int c = s.charAt(i);
-            if ((c < 32 && c != '\n' && c != '\r' && c != '\t') || c > 126) bad++;
+            if ((c < MIN_PRINTABLE_CHAR && c != '\n' && c != '\r' && c != '\t')
+                    || c > MAX_PRINTABLE_CHAR) bad++;
         }
-        return bad * 5 > s.length();
+        return bad * BINARY_BAD_CHAR_RATIO > s.length();
     }
 
     private float[] vectorFromBlob(byte[] blob) throws IOException {
         int d = dim();
-        if (blob == null || blob.length < d * 4) {
+        if (blob == null || blob.length < d * FLOAT_BYTES) {
             throw new IOException("Invalid embedding vector blob length=" +
                     (blob == null ? "null" : blob.length));
         }

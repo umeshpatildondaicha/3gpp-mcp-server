@@ -83,7 +83,8 @@ public class BootstrapService {
         } catch (Exception e) {
             startupState.phase("failed");
             startupState.ready(false);
-            log.error("Startup failed", e);
+            // Rethrown with context; the exception (and its cause) is logged by the
+            // container's startup failure handling, so no duplicate log here (S2139).
             throw new IllegalStateException("Startup failed: " + e.getMessage(), e);
         }
     }

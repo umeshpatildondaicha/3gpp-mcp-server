@@ -12,6 +12,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class OpsController {
+    private static final String KEY_READY = "ready";
+    private static final String KEY_STATUS = "status";
+
     private final StartupState startupState;
     private final KbDataService kbDataService;
     private final long startMillis = System.currentTimeMillis();
@@ -29,7 +32,7 @@ public class OpsController {
                 "version", "2.0.0",
                 "mcp", base + "/mcp",
                 "health", base + "/health",
-                "ready", base + "/ready",
+                KEY_READY, base + "/ready",
                 "actuator_health", base + "/actuator/health"
         );
     }
@@ -38,8 +41,8 @@ public class OpsController {
     public Map<String, Object> health() {
         long up = Duration.ofMillis(System.currentTimeMillis() - startMillis).toSeconds();
         return Map.of(
-                "status", "ok",
-                "ready", startupState.ready(),
+                KEY_STATUS, "ok",
+                KEY_READY, startupState.ready(),
                 "startup_phase", startupState.phase(),
                 "name", "3gpp-telecom-kb",
                 "version", "2.0.0",
@@ -52,9 +55,9 @@ public class OpsController {
     public ResponseEntity<Map<String, Object>> ready() {
         if (!startupState.ready()) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(Map.of("ready", false, "phase", startupState.phase()));
+                    .body(Map.of(KEY_READY, false, "phase", startupState.phase()));
         }
-        return ResponseEntity.ok(Map.of("ready", true));
+        return ResponseEntity.ok(Map.of(KEY_READY, true));
     }
 
     // Liveness/readiness probe endpoint expected by VisionWaves k8s deployment
@@ -62,8 +65,8 @@ public class OpsController {
     public ResponseEntity<Map<String, Object>> ping() {
         if (!startupState.ready()) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(Map.of("status", "starting", "phase", startupState.phase()));
+                    .body(Map.of(KEY_STATUS, "starting", "phase", startupState.phase()));
         }
-        return ResponseEntity.ok(Map.of("status", "ok"));
+        return ResponseEntity.ok(Map.of(KEY_STATUS, "ok"));
     }
 }

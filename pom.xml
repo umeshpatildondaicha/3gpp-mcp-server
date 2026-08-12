@@ -14,6 +14,15 @@
         <spring.ai.version>1.1.4</spring.ai.version>
         <!-- Knowledge-base source directory; override with -Dkb.db.dir=... -->
         <kb.db.dir>${project.basedir}/3gpp_kb</kb.db.dir>
+
+        <!-- SonarQube analysis. Host URL and token come from the CLI / CI env:
+             mvn verify sonar:sonar -Dsonar.host.url=... -Dsonar.token=... -->
+        <sonar.projectKey>com.vwaves:3gpp-mcp-server</sonar.projectKey>
+        <sonar.projectName>3gpp-mcp-server</sonar.projectName>
+        <sonar.java.source>${java.version}</sonar.java.source>
+        <sonar.sourceEncoding>UTF-8</sonar.sourceEncoding>
+        <sonar.coverage.jacoco.xmlReportPaths>${project.build.directory}/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
+        <sonar.exclusions>**/target/**,**/3gpp_kb/**,**/*.db,ui/**,bench/**,pg/**</sonar.exclusions>
     </properties>
 
     <dependencyManagement>
@@ -181,6 +190,41 @@
                                 </copy>
                             </target>
                         </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.sonarsource.scanner.maven</groupId>
+                <artifactId>sonar-maven-plugin</artifactId>
+                <version>5.7.0.6970</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+                <configuration>
+                    <!-- Byte Buddy (via Mockito) needs the experimental flag on JDKs newer
+                         than it officially supports (local toolchain is JDK 26). -->
+                    <argLine>@{argLine} -Dnet.bytebuddy.experimental=true</argLine>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.13</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
                     </execution>
                 </executions>
             </plugin>

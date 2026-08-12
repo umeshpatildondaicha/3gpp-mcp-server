@@ -58,6 +58,19 @@ public class IntentCatalogService {
             new Intent("unknown", Integer.MAX_VALUE, false,
                     "unknown — the intent catalogue could not be loaded");
 
+    /** Weak terms only classify in company — a single hit is not enough. */
+    private static final int MIN_WEAK_HITS = 2;
+
+    /** An "intent" row: kind, id, priority, sticky, hint. */
+    private static final int INTENT_ROW_MIN_COLUMNS = 5;
+    private static final int PRIORITY_COLUMN = 2;
+    private static final int STICKY_COLUMN = 3;
+    private static final int HINT_COLUMN = 4;
+
+    /** A "term"/"weak" row: kind, intent id, term. */
+    private static final int TERM_ROW_MIN_COLUMNS = 3;
+    private static final int TERM_COLUMN = 2;
+
     private final Map<String, Intent> byId;
     private final List<Intent> byPriority;
     private final Map<String, List<String>> termsByIntent;
@@ -116,7 +129,7 @@ public class IntentCatalogService {
             for (String term : weakByIntent.getOrDefault(intent.id(), List.of())) {
                 if (q.contains(term)) weakHits++;
             }
-            if (weakHits >= 2) return intent;
+            if (weakHits >= MIN_WEAK_HITS) return intent;
         }
         return null;
     }
@@ -141,42 +154,67 @@ public class IntentCatalogService {
             int lineNo = 0;
             while ((line = br.readLine()) != null) {
                 lineNo++;
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#")) continue;
-                String[] p = t.split("\t");
-                String kind = p[0].strip().toLowerCase(Locale.ROOT);
-                if ("intent".equals(kind) && p.length >= 5) {
-                    String id = p[1].strip().toLowerCase(Locale.ROOT);
-                    int priority;
-                    try {
-                        priority = Integer.parseInt(p[2].strip());
-                    } catch (NumberFormatException e) {
-                        log.warn("intents.tsv line {}: non-numeric priority '{}' — skipped", lineNo, p[2]);
-                        continue;
-                    }
-                    boolean sticky = Boolean.parseBoolean(p[3].strip());
-                    String hint = p[4].strip();
-                    intents.put(id, new Intent(id, priority, sticky, hint));
-                } else if (("term".equals(kind) || "weak".equals(kind)) && p.length >= 3) {
-                    String id = p[1].strip().toLowerCase(Locale.ROOT);
-                    String term = p[2].strip().toLowerCase(Locale.ROOT);
-                    if (!term.isEmpty()) {
-                        ("weak".equals(kind) ? weak : terms)
-                                .computeIfAbsent(id, k -> new ArrayList<>()).add(term);
-                    }
-                } else {
-                    log.warn("intents.tsv line {}: unrecognised row '{}' — skipped", lineNo, t);
-                }
+                parseLine(line, lineNo, intents, terms, weak);
             }
         } catch (IOException e) {
             log.warn("failed reading intents from {}: {} — intent routing disabled", path, e.getMessage());
             return;
         }
-        // Term rows naming an intent that was never declared are dead config.
-        for (String id : terms.keySet()) {
-            if (!intents.containsKey(id)) {
+        warnAboutUndeclaredIntents(intents, terms);
+    }
+
+    private static void parseLine(String line, int lineNo,
+                                  Map<String, Intent> intents, Map<String, List<String>> terms,
+                                  Map<String, List<String>> weak) {
+        String t = line.strip();
+        if (t.isEmpty() || t.startsWith("#")) return;
+        String[] p = t.split("\t");
+        String kind = p[0].strip().toLowerCase(Locale.ROOT);
+        if ("intent".equals(kind) && p.length >= INTENT_ROW_MIN_COLUMNS) {
+            parseIntentRow(p, lineNo, intents);
+        } else if (("term".equals(kind) || "weak".equals(kind)) && p.length >= TERM_ROW_MIN_COLUMNS) {
+            parseTermRow(kind, p, terms, weak);
+        } else {
+            log.warn("intents.tsv line {}: unrecognised row '{}' — skipped", lineNo, t);
+        }
+    }
+
+    private static void parseIntentRow(String[] p, int lineNo, Map<String, Intent> intents) {
+        String id = p[1].strip().toLowerCase(Locale.ROOT);
+        Integer priority = parsePriority(p[PRIORITY_COLUMN], lineNo);
+        if (priority == null) return;
+        boolean sticky = Boolean.parseBoolean(p[STICKY_COLUMN].strip());
+        String hint = p[HINT_COLUMN].strip();
+        intents.put(id, new Intent(id, priority, sticky, hint));
+    }
+
+    /** @return the parsed priority, or {@code null} (with a warning) when non-numeric. */
+    private static Integer parsePriority(String raw, int lineNo) {
+        try {
+            return Integer.parseInt(raw.strip());
+        } catch (NumberFormatException e) {
+            log.warn("intents.tsv line {}: non-numeric priority '{}' — skipped", lineNo, raw);
+            return null;
+        }
+    }
+
+    private static void parseTermRow(String kind, String[] p,
+                                     Map<String, List<String>> terms, Map<String, List<String>> weak) {
+        String id = p[1].strip().toLowerCase(Locale.ROOT);
+        String term = p[TERM_COLUMN].strip().toLowerCase(Locale.ROOT);
+        if (!term.isEmpty()) {
+            ("weak".equals(kind) ? weak : terms)
+                    .computeIfAbsent(id, k -> new ArrayList<>()).add(term);
+        }
+    }
+
+    /** Term rows naming an intent that was never declared are dead config. */
+    private static void warnAboutUndeclaredIntents(Map<String, Intent> intents,
+                                                   Map<String, List<String>> terms) {
+        for (Map.Entry<String, List<String>> entry : terms.entrySet()) {
+            if (!intents.containsKey(entry.getKey())) {
                 log.warn("intents.tsv: {} term(s) reference undeclared intent '{}' — they will never match",
-                        terms.get(id).size(), id);
+                        entry.getValue().size(), entry.getKey());
             }
         }
     }

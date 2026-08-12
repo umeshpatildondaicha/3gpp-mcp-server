@@ -1,12 +1,12 @@
 package com.vwaves.mcp.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vwaves.mcp.model.SearchFilter;
 import com.vwaves.mcp.model.SearchHit;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -47,6 +47,11 @@ public class QueryLogger {
     private static final Logger log = LoggerFactory.getLogger("telecom_kb.queries");
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /** How many top results to include in each log line. */
+    private static final int TOP_HITS_LOGGED = 5;
+    /** 10^4 — rounds doubles to 4 decimal places. */
+    private static final double ROUND4_FACTOR = 10000.0;
+
     private final boolean enabled;
 
     public QueryLogger(@Value("${app.query-log-enabled:true}") boolean enabled) {
@@ -56,14 +61,15 @@ public class QueryLogger {
     public void logQuery(
             String query,
             int topK,
-            String series,
-            String release,
-            String docType,
+            SearchFilter filter,
             double extrasDbWeight,
             long latencyMs,
             List<SearchHit> hits
     ) {
         if (!enabled || !log.isInfoEnabled()) return;
+        String series  = filter.series();
+        String release = filter.release();
+        String docType = filter.docType();
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("ts", Instant.now().toString());
         entry.put("query", query);
@@ -77,14 +83,14 @@ public class QueryLogger {
 
         // Compact top-5 view: rank | spec_id | score
         List<Map<String, Object>> top = hits.stream()
-                .limit(5)
+                .limit(TOP_HITS_LOGGED)
                 .map(h -> {
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("spec_id", h.specId());
                     m.put("score", h.score());
                     return m;
                 })
-                .collect(Collectors.toList());
+                .toList();
         entry.put("top", top);
 
         try {
@@ -96,6 +102,6 @@ public class QueryLogger {
     }
 
     private static double round4(double d) {
-        return Math.round(d * 10000.0) / 10000.0;
+        return Math.round(d * ROUND4_FACTOR) / ROUND4_FACTOR;
     }
 }

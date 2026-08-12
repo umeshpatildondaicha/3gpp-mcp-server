@@ -1,5 +1,6 @@
 package com.vwaves.mcp.service;
 
+import com.vwaves.mcp.model.SearchFilter;
 import com.vwaves.mcp.model.SearchHit;
 import java.sql.SQLException;
 import java.text.NumberFormat;
@@ -19,6 +20,47 @@ import org.springframework.stereotype.Service;
 @Service
 public class ThreeGppToolService {
     private static final Logger log = LoggerFactory.getLogger(ThreeGppToolService.class);
+
+    // ── Named limits and defaults (values unchanged; see the call sites) ─────
+    /** Upper clamp for topK on both the single and the batch search. */
+    private static final int MAX_TOP_K = 50;
+    /** Default topK for a single search3gpp call. */
+    private static final int DEFAULT_SINGLE_TOP_K = 10;
+    /** Default per-query topK in a batch — lower than the single-query default
+     *  because N queries share one response. */
+    private static final int DEFAULT_BATCH_TOP_K = 5;
+    /** Upper clamp for maxPerSpec (chunks from any single spec). */
+    private static final int MAX_CHUNKS_PER_SPEC = 5;
+    /** Upper clamp for perLayer in getProcedureFlow. */
+    private static final int MAX_PROCEDURE_CHUNKS_PER_LAYER = 8;
+    /** Default number of IE definitions returned by lookupIeDefinition. */
+    private static final int DEFAULT_IE_DEFINITIONS = 8;
+    /** Upper clamp for the IE definition limit. */
+    private static final int MAX_IE_DEFINITIONS = 20;
+    /** Retrieval depth for the citation check in validateAnswer. */
+    private static final int VALIDATE_ANSWER_TOP_K = 15;
+    /** Default chunk count returned by getSpecInfo. */
+    private static final int DEFAULT_SPEC_INFO_CHUNKS = 5;
+    /** Upper clamp for getSpecInfo's maxChunks. */
+    private static final int MAX_SPEC_INFO_CHUNKS = 20;
+    /** Horizontal-rule width of the listSpecs table. */
+    private static final int SPEC_TABLE_RULE_WIDTH = 70;
+    /** Horizontal-rule width of the listSeries table. */
+    private static final int SERIES_TABLE_RULE_WIDTH = 55;
+    /** Horizontal-rule width of the kbStats block. */
+    private static final int STATS_RULE_WIDTH = 40;
+    /** Scale factor for rounding to three decimal places. */
+    private static final double ROUND3_SCALE = 1000.0;
+    /** Column width that aligns "Title  ", "Series ", "More   " labels. */
+    private static final int LABEL_COLUMN_WIDTH = 7;
+    /** More newlines than this and the query looks like pasted content. */
+    private static final int MAX_QUERY_NEWLINES = 8;
+
+    // ── Repeated JSON field names ────────────────────────────────────────────
+    private static final String ERROR_KEY = "error";
+    private static final String NO_MATCH_KEY = "no_match";
+    private static final String SPEC_ID_KEY = "spec_id";
+    private static final String RELEASE_KEY = "release";
 
     // ── Exact-match result cache ─────────────────────────────────────────────
     // Repeat of an IDENTICAL query with identical filters only. There is no
@@ -248,147 +290,179 @@ public class ThreeGppToolService {
             @ToolParam(required = false, description = "Filter by document type: \"TS\"/\"TR\" (3GPP), \"REC\" (ITU-T), \"RFC\" (IETF), \"GS\" (ETSI), \"CLI\" (Junos statements/commands). Applied to EVERY query in the batch. Junos is \"CLI\", never \"SPEC\".") String docType,
             @ToolParam(required = false, description = "Response detail: \"brief\" (≤3 key sentences), \"normal\" (adaptive answer-focused extraction, default), or \"full\" (raw chunk text — use only when normal seems to be missing context)") String verbosity,
             @ToolParam(required = false, description = "Max chunks from any single spec (1-5, default 1). Raise to 3 when you already know the owning spec and want the exact clause — e.g. an ASN.1 parameter definition, which otherwise loses to prose that merely mentions the parameter.") Integer maxPerSpec
-    ) throws SQLException {
+    ) {
         return runBatch(queries, topK, series, release, docType, verbosity, maxPerSpec);
     }
 
     private String runBatch(
             List<String> queries, Integer topK, String series, String release,
             String docType, String verbosity, Integer maxPerSpec
-    ) throws SQLException {
+    ) {
+        List<String> batch = normalizeBatchQueries(queries);
+        if (batch.isEmpty()) {
+            // Null, empty, or all-blank. Say so as JSON, because a caller of the batch
+            // tool is parsing JSON — an English sentence here would fail its parse and
+            // read as a transport fault rather than an empty input.
+            return writeJson(java.util.Map.of(ERROR_KEY,
+                    "`queries` is required and must contain at least one non-empty string. "
+                    + "For a single topic use the single-query search tool instead."), "batch");
+        }
+        int dropped = Math.max(0, batch.size() - MAX_BATCH_QUERIES);
+        List<String> overflow = dropped > 0
+                ? new ArrayList<>(batch.subList(MAX_BATCH_QUERIES, batch.size()))
+                : List.of();
+        if (dropped > 0) batch = batch.subList(0, MAX_BATCH_QUERIES);
+        // Default lower than the single-query default: N queries share one
+        // response, and the caller's context window is the real budget.
+        int perQueryK = topK == null ? DEFAULT_BATCH_TOP_K : Math.max(1, Math.min(MAX_TOP_K, topK));
+
+        // series/docType apply to the WHOLE batch, and a batch is usually
+        // heterogeneous — that is a real hazard, but dropping the filters is
+        // measurably worse. On queries=[mask, export-grt, ip-prefix-list] with
+        // series="JUNIPER" the filter helps two of three and hurts one:
+        //   mask            filtered Juniper unicast-ethernet 0.51 | unfiltered 3GPP 38.104   0.38
+        //   ip-prefix-list  filtered Juniper prefix-list      1.27 | unfiltered nokia-state   0.49
+        //   export-grt      filtered omit-no-export           0.44 | unfiltered nokia-conf    0.46  <- Nokia param
+        // So the filter stays, and the caller is told what it costs instead.
+        // The proper fix is a per-item filter, which the schema cannot express
+        // today. Until then this note is what lets a caller notice the miss —
+        // and it is exactly what a caller did unprompted: it saw export-grt
+        // return BGP statements, re-ran that one query alone with no filter,
+        // and got the right Nokia container.
+        boolean filtered = (series != null && !series.isBlank())
+                || (docType != null && !docType.isBlank());
+
+        // JSON, not N text blocks. Measured on a 3-query batch: text 2,763
+        // tokens vs JSON 1,943 (-30%), because the per-hit
+        // "More: call getSpecInfo(...)" line, the "=" separators and the
+        // guidance prose repeat once per query in the text form while the
+        // structure carries them for free here. It also spares the caller
+        // from parsing "QUERY 1/3:" headers to tell the sections apart.
+        Map<String, Object> byQuery = new java.util.LinkedHashMap<>();
+        Map<String, Object> meta = buildBatchMeta(batch.size(), dropped, filtered);
+        byQuery.put("_meta", meta);
+
+        // Every query the caller sent gets an entry, including the ones
+        // over the cap. Dropping them silently is how "not searched"
+        // becomes "not found": measured on a 36-alarm list, the model
+        // sent all 36 in one call, got 20 back, and reported the other 16
+        // as absent from the corpus — among them Ospf Originate Lsa
+        // (0.67), Flap Bgp Neighbor (0.64) and Link Down (0.37), all of
+        // which the index answers. A `_meta.dropped` count did not stop
+        // that, because the model reads the per-query map, not the meta.
+        // The explanation lives in _meta, once. Repeating it per entry cost
+        // ~3,000 chars on a 36-query call — enough, on its own, to push the
+        // reply past the caller's clip budget and shrink every real excerpt.
+        for (String over : overflow) {
+            byQuery.put(over, java.util.Map.of("not_searched", true));
+        }
+        List<java.util.concurrent.Future<Object>> running =
+                submitBatchQueries(batch, perQueryK, series, release, docType, verbosity, maxPerSpec);
+        collectBatchResults(batch, running, byQuery);
+        // Count the empty ones and explain them once. `meta` is the same
+        // object already stored under "_meta", so mutating it here still
+        // lands in the serialised reply.
+        long empty = byQuery.values().stream()
+                .filter(v -> v instanceof Map<?, ?> mm
+                        && Boolean.TRUE.equals(mm.get(NO_MATCH_KEY)))
+                .count();
+        if (empty > 0) {
+            meta.put(NO_MATCH_KEY, empty);
+            meta.put("no_match_note", NO_MATCH_NOTE);
+        }
+        return writeJson(byQuery, "batch");
+    }
+
+    /** Trims the caller's queries and drops null/blank entries; a null input
+     *  yields an empty list. */
+    private static List<String> normalizeBatchQueries(List<String> queries) {
+        List<String> batch = new ArrayList<>();
         if (queries != null) {
-            List<String> batch = new ArrayList<>();
             for (String s : queries) {
                 if (s != null && !s.isBlank()) batch.add(s.trim());
             }
-            if (!batch.isEmpty()) {
-                int dropped = Math.max(0, batch.size() - MAX_BATCH_QUERIES);
-                List<String> overflow = dropped > 0
-                        ? new ArrayList<>(batch.subList(MAX_BATCH_QUERIES, batch.size()))
-                        : List.of();
-                if (dropped > 0) batch = batch.subList(0, MAX_BATCH_QUERIES);
-                // Default lower than the single-query default: N queries share one
-                // response, and the caller's context window is the real budget.
-                int perQueryK = topK == null ? 5 : Math.max(1, Math.min(50, topK));
-
-                // series/docType apply to the WHOLE batch, and a batch is usually
-                // heterogeneous — that is a real hazard, but dropping the filters is
-                // measurably worse. On queries=[mask, export-grt, ip-prefix-list] with
-                // series="JUNIPER" the filter helps two of three and hurts one:
-                //   mask            filtered Juniper unicast-ethernet 0.51 | unfiltered 3GPP 38.104   0.38
-                //   ip-prefix-list  filtered Juniper prefix-list      1.27 | unfiltered nokia-state   0.49
-                //   export-grt      filtered omit-no-export           0.44 | unfiltered nokia-conf    0.46  <- Nokia param
-                // So the filter stays, and the caller is told what it costs instead.
-                // The proper fix is a per-item filter, which the schema cannot express
-                // today. Until then this note is what lets a caller notice the miss —
-                // and it is exactly what a caller did unprompted: it saw export-grt
-                // return BGP statements, re-ran that one query alone with no filter,
-                // and got the right Nokia container.
-                boolean filtered = (series != null && !series.isBlank())
-                        || (docType != null && !docType.isBlank());
-
-                // JSON, not N text blocks. Measured on a 3-query batch: text 2,763
-                // tokens vs JSON 1,943 (-30%), because the per-hit
-                // "More: call getSpecInfo(...)" line, the "=" separators and the
-                // guidance prose repeat once per query in the text form while the
-                // structure carries them for free here. It also spares the caller
-                // from parsing "QUERY 1/3:" headers to tell the sections apart.
-                Map<String, Object> byQuery = new java.util.LinkedHashMap<>();
-                Map<String, Object> meta = new java.util.LinkedHashMap<>();
-                meta.put("queries", batch.size());
-                if (dropped > 0) {
-                    meta.put("dropped", dropped);
-                    meta.put("dropped_note", "the limit is " + MAX_BATCH_QUERIES
-                            + " queries per call. The " + dropped + " entries marked "
-                            + "\"not_searched\" below were NOT run — that is not a result, "
-                            + "and you cannot report them as not found. Send them in "
-                            + "another search3gppBatch call before answering.");
-                }
-                if (filtered) {
-                    meta.put("filters_applied_to_every_query", true);
-                    meta.put("filter_note", "series/docType were applied to ALL queries below. "
-                            + "If a query's hits look unrelated to what you asked — the term does "
-                            + "not appear in them — that filter is probably hiding the owning "
-                            + "document. Re-run THAT ONE query alone with `query=` and no filters "
-                            + "before concluding the corpus lacks it.");
-                }
-                byQuery.put("_meta", meta);
-
-                // Every query the caller sent gets an entry, including the ones
-                // over the cap. Dropping them silently is how "not searched"
-                // becomes "not found": measured on a 36-alarm list, the model
-                // sent all 36 in one call, got 20 back, and reported the other 16
-                // as absent from the corpus — among them Ospf Originate Lsa
-                // (0.67), Flap Bgp Neighbor (0.64) and Link Down (0.37), all of
-                // which the index answers. A `_meta.dropped` count did not stop
-                // that, because the model reads the per-query map, not the meta.
-                // The explanation lives in _meta, once. Repeating it per entry cost
-                // ~3,000 chars on a 36-query call — enough, on its own, to push the
-                // reply past the caller's clip budget and shrink every real excerpt.
-                for (String over : overflow) {
-                    byQuery.put(over, java.util.Map.of("not_searched", true));
-                }
-                // The queries are independent retrieval passes, so run them on the
-                // shared bounded pool instead of one after the other. The pool is
-                // JVM-wide and capped at 4 on purpose: measured 2026-08-10, one JVM's
-                // throughput saturates at 4 concurrent searches (16 queries: 32s
-                // sequential → 21s wall, no gain at 8 workers, only latency) — the
-                // pipeline is already multi-threaded inside ONNX, so more batch
-                // threads would just steal cores from concurrent single-query
-                // callers on the same pod. Sharing one pool across batch calls also
-                // means two simultaneous batches degrade fairly instead of
-                // stampeding the CPU. Results are collected back IN INPUT ORDER —
-                // byQuery is a LinkedHashMap keyed by the caller's own query
-                // strings, and that ordering is part of the reply contract.
-                List<java.util.concurrent.Future<Object>> running = new ArrayList<>(batch.size());
-                for (String one : batch) {
-                    running.add(BATCH_POOL.submit(() -> {
-                        try {
-                            // searchSingle returns a JSON document here; re-parse it so the
-                            // whole reply is one object rather than a string of strings.
-                            String raw = searchSingle(one, perQueryK, series, release, docType,
-                                                      verbosity, maxPerSpec, true);
-                            return JSON.readValue(raw, Object.class);
-                        } catch (Exception e) {
-                            // One failing query must not lose the others.
-                            return java.util.Map.of("error",
-                                    e.getClass().getSimpleName() + ": " + e.getMessage());
-                        }
-                    }));
-                }
-                for (int i = 0; i < batch.size(); i++) {
-                    Object value;
-                    try {
-                        value = running.get(i).get();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        value = java.util.Map.of("error", "Interrupted: " + e.getMessage());
-                    } catch (java.util.concurrent.ExecutionException e) {
-                        value = java.util.Map.of("error",
-                                e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage());
-                    }
-                    byQuery.put(batch.get(i), value);
-                }
-                // Count the empty ones and explain them once. `meta` is the same
-                // object already stored under "_meta", so mutating it here still
-                // lands in the serialised reply.
-                long empty = byQuery.values().stream()
-                        .filter(v -> v instanceof Map<?, ?> mm
-                                && Boolean.TRUE.equals(mm.get("no_match")))
-                        .count();
-                if (empty > 0) {
-                    meta.put("no_match", empty);
-                    meta.put("no_match_note", NO_MATCH_NOTE);
-                }
-                return writeJson(byQuery, "batch");
-            }
         }
-        // Null, empty, or all-blank. Say so as JSON, because a caller of the batch
-        // tool is parsing JSON — an English sentence here would fail its parse and
-        // read as a transport fault rather than an empty input.
-        return writeJson(java.util.Map.of("error",
-                "`queries` is required and must contain at least one non-empty string. "
-                + "For a single topic use the single-query search tool instead."), "batch");
+        return batch;
+    }
+
+    /** The batch reply's `_meta` entry: query count plus the cap-drop and
+     *  batch-wide-filter notes when they apply. */
+    private static Map<String, Object> buildBatchMeta(int batchSize, int dropped, boolean filtered) {
+        Map<String, Object> meta = new java.util.LinkedHashMap<>();
+        meta.put("queries", batchSize);
+        if (dropped > 0) {
+            meta.put("dropped", dropped);
+            meta.put("dropped_note", "the limit is " + MAX_BATCH_QUERIES
+                    + " queries per call. The " + dropped + " entries marked "
+                    + "\"not_searched\" below were NOT run — that is not a result, "
+                    + "and you cannot report them as not found. Send them in "
+                    + "another search3gppBatch call before answering.");
+        }
+        if (filtered) {
+            meta.put("filters_applied_to_every_query", true);
+            meta.put("filter_note", "series/docType were applied to ALL queries below. "
+                    + "If a query's hits look unrelated to what you asked — the term does "
+                    + "not appear in them — that filter is probably hiding the owning "
+                    + "document. Re-run THAT ONE query alone with `query=` and no filters "
+                    + "before concluding the corpus lacks it.");
+        }
+        return meta;
+    }
+
+    /**
+     * The queries are independent retrieval passes, so run them on the
+     * shared bounded pool instead of one after the other. The pool is
+     * JVM-wide and capped at 4 on purpose: measured 2026-08-10, one JVM's
+     * throughput saturates at 4 concurrent searches (16 queries: 32s
+     * sequential → 21s wall, no gain at 8 workers, only latency) — the
+     * pipeline is already multi-threaded inside ONNX, so more batch
+     * threads would just steal cores from concurrent single-query
+     * callers on the same pod. Sharing one pool across batch calls also
+     * means two simultaneous batches degrade fairly instead of
+     * stampeding the CPU. Results are collected back IN INPUT ORDER —
+     * byQuery is a LinkedHashMap keyed by the caller's own query
+     * strings, and that ordering is part of the reply contract.
+     */
+    private List<java.util.concurrent.Future<Object>> submitBatchQueries(
+            List<String> batch, int perQueryK, String series, String release,
+            String docType, String verbosity, Integer maxPerSpec) {
+        List<java.util.concurrent.Future<Object>> running = new ArrayList<>(batch.size());
+        for (String one : batch) {
+            running.add(BATCH_POOL.submit(() -> {
+                try {
+                    // searchSingle returns a JSON document here; re-parse it so the
+                    // whole reply is one object rather than a string of strings.
+                    String raw = searchSingle(one, perQueryK,
+                                              new SearchFilter(series, release, docType),
+                                              verbosity, maxPerSpec, true);
+                    return JSON.readValue(raw, Object.class);
+                } catch (Exception e) {
+                    // One failing query must not lose the others.
+                    return java.util.Map.of(ERROR_KEY,
+                            e.getClass().getSimpleName() + ": " + e.getMessage());
+                }
+            }));
+        }
+        return running;
+    }
+
+    /** Collects the futures back IN INPUT ORDER into {@code byQuery}. */
+    private static void collectBatchResults(
+            List<String> batch, List<java.util.concurrent.Future<Object>> running,
+            Map<String, Object> byQuery) {
+        for (int i = 0; i < batch.size(); i++) {
+            Object value;
+            try {
+                value = running.get(i).get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                value = java.util.Map.of(ERROR_KEY, "Interrupted: " + e.getMessage());
+            } catch (java.util.concurrent.ExecutionException e) {
+                value = java.util.Map.of(ERROR_KEY,
+                        e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage());
+            }
+            byQuery.put(batch.get(i), value);
+        }
     }
 
     /** Upper bound on `queries`. Each item is a full retrieval + rerank pass.
@@ -513,7 +587,8 @@ public class ThreeGppToolService {
             String query, Integer topK, String series, String release,
             String docType, String verbosity, Integer maxPerSpec
     ) throws SQLException {
-        return searchSingle(query, topK, series, release, docType, verbosity, maxPerSpec, false);
+        return searchSingle(query, topK, new SearchFilter(series, release, docType),
+                verbosity, maxPerSpec, false);
     }
 
     /**
@@ -525,33 +600,16 @@ public class ThreeGppToolService {
      *   it is what every existing caller already parses.
      */
     private String searchSingle(
-            String query, Integer topK, String series, String release,
-            String docType, String verbosity, Integer maxPerSpec, boolean asJson
+            String query, Integer topK, SearchFilter filter,
+            String verbosity, Integer maxPerSpec, boolean asJson
     ) throws SQLException {
+        String series  = filter.series();
+        String release = filter.release();
+        String docType = filter.docType();
         String q = defaultValue(query, "");
-        if (q.isBlank()) {
-            return maybeJsonError(asJson,
-                    "Query is empty. Provide a natural-language search term, e.g. \"NR initial access\".");
-        }
-        String docReason = looksLikeDocument(q);
-        if (docReason != null) {
-            return maybeJsonError(asJson, "Query rejected: " + docReason + "\n\n"
-                    + "This is a search query, not a document sink. A whole payload averaged\n"
-                    + "into one embedding matches nothing — measured on a 24 KB Bulk-CM export,\n"
-                    + "the top score was 0.15 (the noise floor) with all results tied, and the\n"
-                    + "answer that followed cited unrelated specs.\n\n"
-                    + "Do this instead: parse the document yourself, then issue ONE short query\n"
-                    + "per item. For a Bulk-CM export that means one call per parameter:\n"
-                    + "    search3gpp(query=\"si-Periodicity SIB1NB SchedulingInfo\", series=\"36\")\n"
-                    + "and, for its permitted values:\n"
-                    + "    lookupIeDefinition(ieName=\"si-Periodicity\", series=\"36\")\n\n"
-                    + "Skip attributes 3GPP does not define — serial numbers, antenna tilt or\n"
-                    + "bearing, alarm text and severities are vendor or AISG, never in a spec.");
-        }
-        if (series != null && !series.isBlank() && !kbDataService.indexedSeries().contains(series)) {
-            return maybeJsonError(asJson, "Series '" + series + "' is not in the indexed knowledge base. "
-                    + "Indexed series: " + String.join(", ", kbDataService.indexedSeries().stream().sorted().toList())
-                    + ". Use the listSeries tool to see all 3GPP series and which are indexed.");
+        String inputError = searchInputError(q, series, asJson);
+        if (inputError != null) {
+            return inputError;
         }
         // Scope gate — runs BEFORE retrieval. When the question is about a spec
         // this index does not hold, returning the best available near-miss is
@@ -561,7 +619,7 @@ public class ThreeGppToolService {
         // this; see ScopeGateService.
         String outOfScope = scopeGateService.outOfScopeReason(q);
         if (outOfScope != null) {
-            queryLogger.logQuery(q, 0, series, release, docType, 0.0, 0L, List.of());
+            queryLogger.logQuery(q, 0, filter, 0.0, 0L, List.of());
             return maybeJsonError(asJson, outOfScope);
         }
         // Partial coverage: search normally, but say up front that the spec that
@@ -569,9 +627,9 @@ public class ThreeGppToolService {
         // background material for the authoritative definition.
         String caveat = scopeGateService.coverageCaveat(q);
 
-        int k = topK == null ? 10 : Math.max(1, Math.min(50, topK));
+        int k = topK == null ? DEFAULT_SINGLE_TOP_K : Math.max(1, Math.min(MAX_TOP_K, topK));
         Verbosity vb = resolveVerbosity(verbosity);
-        Integer perSpec = maxPerSpec == null ? null : Math.max(1, Math.min(5, maxPerSpec));
+        Integer perSpec = maxPerSpec == null ? null : Math.max(1, Math.min(MAX_CHUNKS_PER_SPEC, maxPerSpec));
 
         // Exact-match cache key: the raw (case-sensitive) query plus every input
         // that changes the output, joined with a control char no real query would
@@ -620,11 +678,11 @@ public class ThreeGppToolService {
         KbDataService.HybridResult result = kbDataService.hybridSearchDetailed(
                 q, expandedQuery,
                 embeddingService.embed(embeddingQuery),
-                k, series, release, docType, perSpec);
+                k, filter, perSpec);
         List<SearchHit> hits = applyScoreCut(result.hits());
         long latencyMs = System.currentTimeMillis() - t0;
 
-        queryLogger.logQuery(q, k, series, release, docType, extrasWeight, latencyMs, hits);
+        queryLogger.logQuery(q, k, filter, extrasWeight, latencyMs, hits);
         String finalResult;
         if (asJson) {
             // The JSON path stays lean on purpose. Neither the adjacent-chunk
@@ -640,6 +698,36 @@ public class ThreeGppToolService {
         }
         searchCache.put(cacheKey, new CacheEntry(finalResult, System.currentTimeMillis() + CACHE_TTL_MILLIS));
         return finalResult;
+    }
+
+    /** Guard checks that reject the input before any retrieval runs; null when the
+     *  input is searchable. Error text is rendered per the caller's asJson mode. */
+    private String searchInputError(String q, String series, boolean asJson) throws SQLException {
+        if (q.isBlank()) {
+            return maybeJsonError(asJson,
+                    "Query is empty. Provide a natural-language search term, e.g. \"NR initial access\".");
+        }
+        String docReason = looksLikeDocument(q);
+        if (docReason != null) {
+            return maybeJsonError(asJson, "Query rejected: " + docReason + "\n\n"
+                    + "This is a search query, not a document sink. A whole payload averaged\n"
+                    + "into one embedding matches nothing — measured on a 24 KB Bulk-CM export,\n"
+                    + "the top score was 0.15 (the noise floor) with all results tied, and the\n"
+                    + "answer that followed cited unrelated specs.\n\n"
+                    + "Do this instead: parse the document yourself, then issue ONE short query\n"
+                    + "per item. For a Bulk-CM export that means one call per parameter:\n"
+                    + "    search3gpp(query=\"si-Periodicity SIB1NB SchedulingInfo\", series=\"36\")\n"
+                    + "and, for its permitted values:\n"
+                    + "    lookupIeDefinition(ieName=\"si-Periodicity\", series=\"36\")\n\n"
+                    + "Skip attributes 3GPP does not define — serial numbers, antenna tilt or\n"
+                    + "bearing, alarm text and severities are vendor or AISG, never in a spec.");
+        }
+        if (series != null && !series.isBlank() && !kbDataService.indexedSeries().contains(series)) {
+            return maybeJsonError(asJson, "Series '" + series + "' is not in the indexed knowledge base. "
+                    + "Indexed series: " + String.join(", ", kbDataService.indexedSeries().stream().sorted().toList())
+                    + ". Use the listSeries tool to see all 3GPP series and which are indexed.");
+        }
+        return null;
     }
 
     private enum Verbosity { BRIEF, NORMAL, FULL }
@@ -684,7 +772,8 @@ public class ThreeGppToolService {
         if (p.isBlank()) {
             return "Procedure is empty. Provide a procedure name, e.g. \"PDU session establishment\".";
         }
-        Integer perOverride = perLayer == null ? null : Math.max(1, Math.min(8, perLayer));
+        Integer perOverride = perLayer == null ? null
+                : Math.max(1, Math.min(MAX_PROCEDURE_CHUNKS_PER_LAYER, perLayer));
         List<ProcedureLayerService.Layer> activeLayers =
                 procedureConfig.layersFor(defaultValue(technology, "5G"));
         if (activeLayers.isEmpty()) {
@@ -707,6 +796,43 @@ public class ThreeGppToolService {
         // Pass 1 — retrieve every layer, then find the best score across all of
         // them. The floor has to be global: scoring 0.26 means something very
         // different when the best hit anywhere is 0.99 versus 0.35.
+        LayerRetrieval retrieval =
+                retrieveProcedureLayers(activeLayers, searchTerm, expanded, vector, perOverride);
+
+        double floor = Math.max(props.procedureLayerFloor(),
+                retrieval.bestOverall() * props.procedureLayerRelativeFloor());
+
+        int layersWithEvidence = 0;
+        List<String> emptyLayers = new ArrayList<>();
+        for (ProcedureLayerService.Layer layer : activeLayers) {
+            if (appendLayerEvidence(lines, emptyLayers, layer,
+                    retrieval.byLayer().get(layer), floor, p)) {
+                layersWithEvidence++;
+            }
+        }
+
+        if (!emptyLayers.isEmpty()) {
+            lines.add("No strong evidence in: " + String.join("; ", emptyLayers));
+            lines.add("State that these legs are unsupported rather than inferring them.");
+            lines.add("");
+        }
+
+        if (layersWithEvidence == 0) {
+            return "No cross-spec evidence found for procedure \"" + p + "\".\n"
+                    + "Try search3gpp with the procedure name, or check the spelling.";
+        }
+        lines.add("Layers with evidence: " + layersWithEvidence + " of " + activeLayers.size()
+                + " (evidence floor " + String.format("%.2f", floor) + ").");
+        return String.join("\n", lines);
+    }
+
+    /** Pass-1 retrieval output: hits per layer plus the best score anywhere. */
+    private record LayerRetrieval(Map<ProcedureLayerService.Layer, List<SearchHit>> byLayer,
+                                  double bestOverall) {}
+
+    private LayerRetrieval retrieveProcedureLayers(
+            List<ProcedureLayerService.Layer> activeLayers, String searchTerm,
+            String expanded, float[] vector, Integer perOverride) throws SQLException {
         Map<ProcedureLayerService.Layer, List<SearchHit>> byLayer = new java.util.LinkedHashMap<>();
         double bestOverall = 0.0;
         for (ProcedureLayerService.Layer layer : activeLayers) {
@@ -714,7 +840,7 @@ public class ThreeGppToolService {
             int per = perOverride != null ? perOverride : layer.perLayer();
 
             List<SearchHit> hits = kbDataService.hybridSearch(
-                    searchTerm, expanded, vector, per, layer.series(), null, null);
+                    searchTerm, expanded, vector, per, SearchFilter.ofSeries(layer.series()));
             // Conformance/test specs describe how to TEST a procedure, never how
             // it works — never a valid citation in a call flow.
             hits = hits.stream()
@@ -731,59 +857,45 @@ public class ThreeGppToolService {
             byLayer.put(layer, hits);
             for (SearchHit h : hits) bestOverall = Math.max(bestOverall, h.score());
         }
+        return new LayerRetrieval(byLayer, bestOverall);
+    }
 
-        double floor = Math.max(props.procedureLayerFloor(),
-                bestOverall * props.procedureLayerRelativeFloor());
+    /** Renders one layer's above-floor hits into {@code lines}. Returns true when
+     *  the layer contributed evidence; false when it was skipped (not retrieved)
+     *  or abstained (recorded in {@code emptyLayers}). */
+    private boolean appendLayerEvidence(List<String> lines, List<String> emptyLayers,
+                                        ProcedureLayerService.Layer layer,
+                                        List<SearchHit> hits, double floor, String p) {
+        if (hits == null) return false;
 
-        int layersWithEvidence = 0;
-        List<String> emptyLayers = new ArrayList<>();
-        for (ProcedureLayerService.Layer layer : activeLayers) {
-            List<SearchHit> hits = byLayer.get(layer);
-            if (hits == null) continue;
-
-            List<SearchHit> kept = new ArrayList<>(
-                    hits.stream().filter(h -> h.score() >= floor).toList());
-            if (kept.isEmpty()) {
-                // Abstain rather than pad. The tool tells the caller to say a leg
-                // is missing rather than invent it; that is only honest if the
-                // tool itself declines to supply weak evidence as if it were real.
-                emptyLayers.add(layer.label() + " (series " + layer.series() + ")");
-                continue;
-            }
-            layersWithEvidence++;
-
-            // Document order within a spec approximates step order for a
-            // procedure clause, so a numbered flow can be read straight off this
-            // rather than reassembled from score-ranked fragments.
-            kept.sort(java.util.Comparator
-                    .comparing(SearchHit::specId)
-                    .thenComparingInt(SearchHit::chunkIndex));
-
-            lines.add("=== " + layer.label() + " (series " + layer.series() + ") ===");
-            for (SearchHit h : kept) {
-                String snippet = h.snippet() == null ? "" : h.snippet().replaceAll("\\s+", " ").strip();
-                String key = rerankService.selectRelevantSentences(
-                        p, h.snippet() == null ? "" : h.snippet(), rerankService.normalSelection());
-                lines.add("  " + h.specId() + " | " + h.release()
-                        + " | chunk " + h.chunkIndex() + " | score " + h.score());
-                lines.add("    " + (key.isBlank() ? snippet : key));
-            }
-            lines.add("");
+        List<SearchHit> kept = new ArrayList<>(
+                hits.stream().filter(h -> h.score() >= floor).toList());
+        if (kept.isEmpty()) {
+            // Abstain rather than pad. The tool tells the caller to say a leg
+            // is missing rather than invent it; that is only honest if the
+            // tool itself declines to supply weak evidence as if it were real.
+            emptyLayers.add(layer.label() + " (series " + layer.series() + ")");
+            return false;
         }
 
-        if (!emptyLayers.isEmpty()) {
-            lines.add("No strong evidence in: " + String.join("; ", emptyLayers));
-            lines.add("State that these legs are unsupported rather than inferring them.");
-            lines.add("");
-        }
+        // Document order within a spec approximates step order for a
+        // procedure clause, so a numbered flow can be read straight off this
+        // rather than reassembled from score-ranked fragments.
+        kept.sort(java.util.Comparator
+                .comparing(SearchHit::specId)
+                .thenComparingInt(SearchHit::chunkIndex));
 
-        if (layersWithEvidence == 0) {
-            return "No cross-spec evidence found for procedure \"" + p + "\".\n"
-                    + "Try search3gpp with the procedure name, or check the spelling.";
+        lines.add("=== " + layer.label() + " (series " + layer.series() + ") ===");
+        for (SearchHit h : kept) {
+            String snippet = h.snippet() == null ? "" : h.snippet().replaceAll("\\s+", " ").strip();
+            String key = rerankService.selectRelevantSentences(
+                    p, h.snippet() == null ? "" : h.snippet(), rerankService.normalSelection());
+            lines.add("  " + h.specId() + " | " + h.release()
+                    + " | chunk " + h.chunkIndex() + " | score " + h.score());
+            lines.add("    " + (key.isBlank() ? snippet : key));
         }
-        lines.add("Layers with evidence: " + layersWithEvidence + " of " + activeLayers.size()
-                + " (evidence floor " + String.format("%.2f", floor) + ").");
-        return String.join("\n", lines);
+        lines.add("");
+        return true;
     }
 
     @Tool(description = """
@@ -821,7 +933,8 @@ public class ThreeGppToolService {
         if (ie.isBlank()) {
             return "ieName is required, e.g. \"maxRetxThreshold\".";
         }
-        int max = limit == null ? 8 : Math.max(1, Math.min(20, limit));
+        int max = limit == null ? DEFAULT_IE_DEFINITIONS
+                : Math.max(1, Math.min(MAX_IE_DEFINITIONS, limit));
         List<KbDataService.IeDefinition> defs =
                 kbDataService.lookupIeDefinition(ie, series, max);
         if (defs.isEmpty()) {
@@ -876,7 +989,7 @@ public class ThreeGppToolService {
 
         List<SearchHit> hits = kbDataService.hybridSearch(
                 q, glossaryService.expand(q), embeddingService.embed(stripQuestionPrefix(q)),
-                15, null, null, null);
+                VALIDATE_ANSWER_TOP_K, SearchFilter.NONE);
         Set<String> retrieved = hits.stream().map(SearchHit::specId).collect(Collectors.toSet());
 
         List<String> supported   = cited.stream().filter(retrieved::contains).sorted().toList();
@@ -932,7 +1045,8 @@ public class ThreeGppToolService {
             @ToolParam(required = false, description = "Max chunks to return (1-20, default 5)") Integer maxChunks,
             @ToolParam(required = false, description = "ALWAYS SET THIS. What you want from the spec, e.g. \"pseudowire status notification\" or \"neighbor state machine\". Without it you get the FIRST chunks of the document, which for any long spec is its cover page and table of contents — navigation, not content. With it you get the chunks that actually discuss your topic, wherever they sit in the document.") String query
     ) throws SQLException {
-        int chunks = maxChunks == null ? 5 : Math.max(1, Math.min(20, maxChunks));
+        int chunks = maxChunks == null ? DEFAULT_SPEC_INFO_CHUNKS
+                : Math.max(1, Math.min(MAX_SPEC_INFO_CHUNKS, maxChunks));
         String q = defaultValue(query, "");
         List<Map<String, Object>> rows =
                 kbDataService.getSpecChunks(defaultValue(specId, ""), chunks, q);
@@ -941,9 +1055,9 @@ public class ThreeGppToolService {
         }
         Map<String, Object> first = rows.getFirst();
         List<String> lines = new ArrayList<>();
-        lines.add("=== 3GPP " + first.get("doc_type") + " " + first.get("spec_id") + " ===");
+        lines.add("=== 3GPP " + first.get("doc_type") + " " + first.get(SPEC_ID_KEY) + " ===");
         lines.add("Title   : " + first.get("title"));
-        lines.add("Release : " + first.get("release"));
+        lines.add("Release : " + first.get(RELEASE_KEY));
         lines.add("Series  : " + first.get("series") + " - " + first.get("series_desc"));
         lines.add("Chunks  : showing " + rows.size() + " of " + first.get("total_chunks") + " total"
                 + (q.isBlank() ? "  (document order — pass query= to get the relevant chunks instead)"
@@ -976,10 +1090,10 @@ public class ThreeGppToolService {
         lines.add("Indexed specs (" + specs.size() + " total, all sources)");
         lines.add("");
         lines.add(String.format("%-14s %-5s %-10s %-8s %s", "Spec ID", "Type", "Release", "Chunks", "Series"));
-        lines.add("-".repeat(70));
+        lines.add("-".repeat(SPEC_TABLE_RULE_WIDTH));
         for (Map<String, Object> spec : specs) {
             lines.add(String.format("%-14s %-5s %-10s %-8s %s",
-                    spec.get("spec_id"), spec.get("doc_type"), spec.get("release"), spec.get("total_chunks"), spec.get("series_desc")));
+                    spec.get(SPEC_ID_KEY), spec.get("doc_type"), spec.get(RELEASE_KEY), spec.get("total_chunks"), spec.get("series_desc")));
         }
         return String.join("\n", lines);
     }
@@ -991,7 +1105,7 @@ public class ThreeGppToolService {
         lines.add("3GPP Series Catalog");
         lines.add("");
         lines.add(String.format("%-8s %-9s %s", "Series", "Indexed", "Description"));
-        lines.add("-".repeat(55));
+        lines.add("-".repeat(SERIES_TABLE_RULE_WIDTH));
         seriesCatalog.entries().forEach(entry -> lines.add(String.format(
                 "%-8s %-9s %s",
                 entry.getKey(),
@@ -1017,7 +1131,7 @@ public class ThreeGppToolService {
 
         List<String> lines = new ArrayList<>();
         lines.add("Telecom Knowledge Base Statistics");
-        lines.add("=".repeat(40));
+        lines.add("=".repeat(STATS_RULE_WIDTH));
         lines.add("Total chunks      : " + NumberFormat.getIntegerInstance().format(total));
         lines.add("Unique specs      : " + specs);
         lines.add("  Substantive     : " + (specs - stubs));
@@ -1078,7 +1192,17 @@ public class ThreeGppToolService {
         // benchmark, so the caller can weigh result [1] instead of guessing.
         // Publish the measured accuracy each level actually buys, so the caller
         // weighs [1] on evidence rather than on the word "high".
-        lines.add(partialCoverage
+        lines.add(confidenceNote(partialCoverage, conf));
+        lines.add("");
+        for (int i = 0; i < hits.size(); i++) {
+            appendHitLines(lines, hits.get(i), i, query, cfg, capDrops);
+        }
+        return String.join("\n", lines);
+    }
+
+    private static String confidenceNote(boolean partialCoverage,
+                                         KbDataService.RetrievalConfidence conf) {
+        return partialCoverage
                 ? "Note   : the low score is EXPECTED here and is explained by the coverage "
                         + "note above — the owning spec is not indexed, so nothing could score "
                         + "well. This is NOT a reason to discard these hits. Cite them for "
@@ -1096,56 +1220,57 @@ public class ThreeGppToolService {
             default       -> "Note   : narrow margin AND the two retrievers disagree — right only "
                     + "~27% of the time. Do not cite [1] alone; read several hits, and "
                     + "consider WebSearch if none fit.";
-        });
-        lines.add("");
-        for (int i = 0; i < hits.size(); i++) {
-            SearchHit h = hits.get(i);
-            // Keep both: rawSnippet preserves newlines for chunk-shape detection,
-            // normalized is what gets displayed when no sentence selection runs.
-            String rawSnippet = h.snippet() == null ? "" : h.snippet();
-            String normalized = rawSnippet.replaceAll("\\s+", " ").strip();
-            String body;
-            String label;
-            if (normalized.isEmpty()) {
-                body  = "(chunk has no extractable text — call getSpecInfo for full content)";
-                label = "Excerpt";
-            } else if (cfg == null) {
-                body  = normalized;
-                label = "Excerpt";
-            } else {
-                String extracted = rerankService.selectRelevantSentences(query, rawSnippet, cfg);
-                body  = extracted.isBlank() ? normalized : extracted;
-                label = "Key";
-            }
-            lines.add("[" + (i + 1) + "] " + h.specId() + " | " + h.release() + " | Score: " + h.score());
-            lines.add("    Title  : " + h.title());
-            lines.add("    Series : " + h.seriesDesc());
-            lines.add("    " + padLabel(label) + ": " + body);
-            if (cfg != null && !normalized.isEmpty()) {
-                lines.add("    More   : call getSpecInfo(specId=\"" + h.specId()
-                        + "\") for the full section, or re-run search with verbosity=\"full\"");
-            }
-            // Chunking splits mid-procedure, so the sentence that completes this
-            // hit's thought may sit one chunk over — a boundary the reranker never
-            // scores. A short preview either side catches that without a second call.
-            KbDataService.AdjacentContext ctx = kbDataService.adjacentContext(h, ADJACENT_PREVIEW_CHARS);
-            if (ctx.before() != null) lines.add("    Before : …" + ctx.before());
-            if (ctx.after()  != null) lines.add("    After  : " + ctx.after() + "…");
-            // The per-spec cap (default 1) optimises for spec diversity, which can
-            // silently cut a second chunk from THIS spec that scored close enough to
-            // matter. "Close enough" reuses confidenceHighMargin — the same gap this
-            // codebase already treats as "not reliably separated" for the top-1 vs
-            // top-2 decision, so a same-spec chunk within that gap of a kept hit is
-            // exactly the case where discarding it silently would be wrong.
-            KbDataService.CapDrop drop = capDrops == null ? null : capDrops.get(h.specId());
-            if (drop != null && (h.score() - drop.droppedTopScore()) < props.confidenceHighMargin()) {
-                lines.add("    Note   : this spec had " + drop.droppedCount() + " more chunk(s) scoring "
-                        + "close (" + drop.droppedTopScore() + ") that the per-spec limit cut. Re-run "
-                        + "with maxPerSpec=3-5 if this spec's full picture matters here.");
-            }
-            lines.add("");
+        };
+    }
+
+    /** Renders one hit's block of the text reply into {@code lines}. */
+    private void appendHitLines(List<String> lines, SearchHit h, int index, String query,
+                                RerankService.SelectionConfig cfg,
+                                Map<String, KbDataService.CapDrop> capDrops) throws SQLException {
+        // Keep both: rawSnippet preserves newlines for chunk-shape detection,
+        // normalized is what gets displayed when no sentence selection runs.
+        String rawSnippet = h.snippet() == null ? "" : h.snippet();
+        String normalized = rawSnippet.replaceAll("\\s+", " ").strip();
+        String body;
+        String label;
+        if (normalized.isEmpty()) {
+            body  = "(chunk has no extractable text — call getSpecInfo for full content)";
+            label = "Excerpt";
+        } else if (cfg == null) {
+            body  = normalized;
+            label = "Excerpt";
+        } else {
+            String extracted = rerankService.selectRelevantSentences(query, rawSnippet, cfg);
+            body  = extracted.isBlank() ? normalized : extracted;
+            label = "Key";
         }
-        return String.join("\n", lines);
+        lines.add("[" + (index + 1) + "] " + h.specId() + " | " + h.release() + " | Score: " + h.score());
+        lines.add("    Title  : " + h.title());
+        lines.add("    Series : " + h.seriesDesc());
+        lines.add("    " + padLabel(label) + ": " + body);
+        if (cfg != null && !normalized.isEmpty()) {
+            lines.add("    More   : call getSpecInfo(specId=\"" + h.specId()
+                    + "\") for the full section, or re-run search with verbosity=\"full\"");
+        }
+        // Chunking splits mid-procedure, so the sentence that completes this
+        // hit's thought may sit one chunk over — a boundary the reranker never
+        // scores. A short preview either side catches that without a second call.
+        KbDataService.AdjacentContext ctx = kbDataService.adjacentContext(h, ADJACENT_PREVIEW_CHARS);
+        if (ctx.before() != null) lines.add("    Before : …" + ctx.before());
+        if (ctx.after()  != null) lines.add("    After  : " + ctx.after() + "…");
+        // The per-spec cap (default 1) optimises for spec diversity, which can
+        // silently cut a second chunk from THIS spec that scored close enough to
+        // matter. "Close enough" reuses confidenceHighMargin — the same gap this
+        // codebase already treats as "not reliably separated" for the top-1 vs
+        // top-2 decision, so a same-spec chunk within that gap of a kept hit is
+        // exactly the case where discarding it silently would be wrong.
+        KbDataService.CapDrop drop = capDrops == null ? null : capDrops.get(h.specId());
+        if (drop != null && (h.score() - drop.droppedTopScore()) < props.confidenceHighMargin()) {
+            lines.add("    Note   : this spec had " + drop.droppedCount() + " more chunk(s) scoring "
+                    + "close (" + drop.droppedTopScore() + ") that the per-spec limit cut. Re-run "
+                    + "with maxPerSpec=3-5 if this spec's full picture matters here.");
+        }
+        lines.add("");
     }
 
     /** Preview length for adjacentContext() — a continuity hint, not a second chunk. */
@@ -1160,7 +1285,7 @@ public class ThreeGppToolService {
     private static String maybeJsonError(boolean asJson, String message) {
         if (!asJson) return message;
         try {
-            return JSON.writeValueAsString(java.util.Map.of("error", message));
+            return JSON.writeValueAsString(java.util.Map.of(ERROR_KEY, message));
         } catch (Exception e) {
             return message;
         }
@@ -1199,7 +1324,7 @@ public class ThreeGppToolService {
             // Explicit, because the alternative the caller used to get was five
             // rows scoring 0.01-0.05 that it then cited as if they were answers.
             // "Nothing matched" is a usable result; five unrelated chunks are not.
-            out.put("no_match", true);
+            out.put(NO_MATCH_KEY, true);
             out.put("hits", List.of());
             // The explanation goes in _meta once, always — this is duplicate removal,
             // not field removal, so it is not tied to BATCH_FIELDS. Verbatim per
@@ -1226,42 +1351,47 @@ public class ThreeGppToolService {
         };
         List<Map<String, Object>> rows = new ArrayList<>();
         for (int i = 0; i < hits.size(); i++) {
-            SearchHit h = hits.get(i);
-            String raw = h.snippet() == null ? "" : h.snippet();
-            String normalized = raw.replaceAll("\\s+", " ").strip();
-            String body;
-            if (normalized.isEmpty()) {
-                body = "(chunk has no extractable text — call getSpecInfo for full content)";
-            } else if (cfg == null) {
-                body = normalized;
-            } else {
-                String extracted = rerankService.selectRelevantSentences(query, raw, cfg);
-                body = extracted.isBlank() ? normalized : extracted;
-            }
-            Map<String, Object> row = new java.util.LinkedHashMap<>();
-            if (BATCH_FIELDS != BatchFields.MINIMAL) row.put("n", i + 1);
-            row.put("spec_id", h.specId());
-            row.put("score", h.score());
-            row.put("title", h.title());
-            // `series` is the human-readable source name ("Juniper Junos CLI
-            // Reference"). For a model it repeats what spec_id and title already
-            // say; 1,733 chars / 2.7% on the 20-query batch. The UI's Evidence
-            // panel does show it, so dropping it blanks that column — which is why
-            // it goes at LEAN and not at FULL.
-            if (BATCH_FIELDS == BatchFields.FULL) row.put("series", h.seriesDesc());
-            if (BATCH_FIELDS != BatchFields.MINIMAL
-                    && h.release() != null && !h.release().isBlank()) {
-                row.put("release", h.release());
-            }
-            row.put("excerpt", body);
-            rows.add(row);
+            rows.add(buildHitRow(hits.get(i), i, query, cfg));
         }
         out.put("hits", rows);
         return writeJson(out, query);
     }
 
+    /** One hit of the JSON reply, honouring the BATCH_FIELDS field set. */
+    private Map<String, Object> buildHitRow(SearchHit h, int index, String query,
+                                            RerankService.SelectionConfig cfg) {
+        String raw = h.snippet() == null ? "" : h.snippet();
+        String normalized = raw.replaceAll("\\s+", " ").strip();
+        String body;
+        if (normalized.isEmpty()) {
+            body = "(chunk has no extractable text — call getSpecInfo for full content)";
+        } else if (cfg == null) {
+            body = normalized;
+        } else {
+            String extracted = rerankService.selectRelevantSentences(query, raw, cfg);
+            body = extracted.isBlank() ? normalized : extracted;
+        }
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        if (BATCH_FIELDS != BatchFields.MINIMAL) row.put("n", index + 1);
+        row.put(SPEC_ID_KEY, h.specId());
+        row.put("score", h.score());
+        row.put("title", h.title());
+        // `series` is the human-readable source name ("Juniper Junos CLI
+        // Reference"). For a model it repeats what spec_id and title already
+        // say; 1,733 chars / 2.7% on the 20-query batch. The UI's Evidence
+        // panel does show it, so dropping it blanks that column — which is why
+        // it goes at LEAN and not at FULL.
+        if (BATCH_FIELDS == BatchFields.FULL) row.put("series", h.seriesDesc());
+        if (BATCH_FIELDS != BatchFields.MINIMAL
+                && h.release() != null && !h.release().isBlank()) {
+            row.put(RELEASE_KEY, h.release());
+        }
+        row.put("excerpt", body);
+        return row;
+    }
+
     private static double round3(double v) {
-        return Math.round(v * 1000.0) / 1000.0;
+        return Math.round(v * ROUND3_SCALE) / ROUND3_SCALE;
     }
 
     private static String writeJson(Object o, String query) {
@@ -1274,7 +1404,9 @@ public class ThreeGppToolService {
 
     private static String padLabel(String label) {
         // Keep alignment with "Title  ", "Series ", "More   " (7 chars).
-        return label.length() >= 7 ? label : label + " ".repeat(7 - label.length());
+        return label.length() >= LABEL_COLUMN_WIDTH
+                ? label
+                : label + " ".repeat(LABEL_COLUMN_WIDTH - label.length());
     }
 
     /** Longest sensible question. Real queries are a phrase; anything near this
@@ -1295,32 +1427,56 @@ public class ThreeGppToolService {
         String t = q.strip();
         // Size and structure only — never the opening character.
         //
-        // This used to reject anything starting '{' and ending '}', or '<' … '>'.
+        // This used to reject queries wrapped in a JSON or XML envelope outright.
         // That is a test of TRANSPORT, not of content: MCP clients routinely wrap a
-        // perfectly good question in JSON, and
-        //     {"query": "VPN Pseudowire Down leading to Link Down", "max_results": 5}
-        // was refused outright — 68 characters carrying one short question. The
-        // refusal is meant to catch a 24 KB payload averaged into one embedding,
-        // and length plus line count already catch that. A small JSON envelope is
-        // cheap to search and its punctuation is stripped by extractFtsTerms
-        // anyway, so the cost of letting it through is a couple of noise tokens;
-        // the cost of refusing it was the whole question.
+        // perfectly good question in JSON, and one such 68-character envelope —
+        // whose query field carried the single short question "VPN Pseudowire Down
+        // leading to Link Down" — was refused outright. The refusal is meant to
+        // catch a 24 KB payload averaged into one embedding, and length plus line
+        // count already catch that. A small JSON envelope is cheap to search and
+        // its punctuation is stripped by the FTS term extractor anyway. Letting it
+        // through costs a couple of noise tokens, while refusing it cost the
+        // whole question.
         if (t.length() > MAX_QUERY_CHARS) {
             return "the query is " + t.length() + " characters; a search query should be a "
                     + "short phrase (limit " + MAX_QUERY_CHARS + ")";
         }
-        if (t.chars().filter(c -> c == '\n').count() > 8) {
+        if (t.chars().filter(c -> c == '\n').count() > MAX_QUERY_NEWLINES) {
             return "the query spans many lines; it looks like pasted content rather than a question";
         }
         return null;
     }
 
+    /** Question-lead-in patterns removed by stripQuestionPrefix. Split into one
+     *  small anchored pattern per lead-in (instead of one big alternation) purely
+     *  for regex readability; each alternative starts with a different word, so
+     *  trying them in order and stripping the first match is equivalent to the
+     *  original single "^(a|b|...)\\s*" replaceAll. */
+    private static final java.util.regex.Pattern[] QUESTION_PREFIXES = {
+            questionPrefix("how\\s+(to|do|does|can|should|would)"),
+            questionPrefix("what\\s+(is|are|does)"),
+            questionPrefix("why\\s+(is|are)"),
+            questionPrefix("explain\\s+"),
+            questionPrefix("describe\\s+"),
+            questionPrefix("tell\\s+me\\s+(about|how)"),
+            questionPrefix("find\\s+"),
+            questionPrefix("show\\s+me\\s+"),
+            questionPrefix("give\\s+me\\s+"),
+    };
+
+    private static java.util.regex.Pattern questionPrefix(String leadIn) {
+        return java.util.regex.Pattern.compile("(?i)^(" + leadIn + ")\\s*");
+    }
+
     private static String stripQuestionPrefix(String query) {
         if (query == null) return "";
-        return query.replaceAll(
-            "(?i)^(how\\s+(to|do|does|can|should|would)|what\\s+(is|are|does)|why\\s+(is|are)|" +
-            "explain\\s+|describe\\s+|tell\\s+me\\s+(about|how)|find\\s+|show\\s+me\\s+|give\\s+me\\s+)\\s*",
-            "").trim();
+        for (java.util.regex.Pattern prefix : QUESTION_PREFIXES) {
+            var m = prefix.matcher(query);
+            if (m.find()) {
+                return m.replaceFirst("").trim();
+            }
+        }
+        return query.trim();
     }
 
     private String defaultValue(String value, String fallback) {

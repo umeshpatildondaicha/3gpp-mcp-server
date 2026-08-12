@@ -1,10 +1,13 @@
 package com.vwaves.mcp.service;
 
 import com.vwaves.mcp.config.AppProperties;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -19,6 +22,12 @@ import org.springframework.stereotype.Service;
 @Service
 public class DbResolver {
     private static final Logger log = LoggerFactory.getLogger(DbResolver.class);
+
+    private static final String PRIMARY_DB_CLASSPATH = "classpath:3gpp_certified.db";
+    private static final String EXTRAS_DB_CLASSPATH = "classpath:telecom_extras.db";
+    private static final String PRIMARY_DB_ENV = "KB_DB_PATH";
+    private static final String EXTRAS_DB_ENV = "KB_DB_PATH2";
+
     private final AppProperties appProperties;
     private final ResourceLoader resourceLoader;
 
@@ -30,17 +39,17 @@ public class DbResolver {
     public Path resolveDb() {
         String configured = appProperties.hasLocalDbPath()
                 ? appProperties.kbDbPath()
-                : "classpath:3gpp_certified.db";
-        warnIfClasspathOverride(configured, "KB_DB_PATH", "classpath:3gpp_certified.db");
-        return resolve(configured, "classpath:3gpp_certified.db", "KB_DB_PATH", "primary");
+                : PRIMARY_DB_CLASSPATH;
+        warnIfClasspathOverride(configured, PRIMARY_DB_ENV, PRIMARY_DB_CLASSPATH);
+        return resolve(configured, PRIMARY_DB_CLASSPATH, PRIMARY_DB_ENV, "primary");
     }
 
     public Path resolveDb2() {
         String configured = appProperties.hasLocalDbPath2()
                 ? appProperties.kbDbPath2()
-                : "classpath:telecom_extras.db";
-        warnIfClasspathOverride(configured, "KB_DB_PATH2", "classpath:telecom_extras.db");
-        return resolve(configured, "classpath:telecom_extras.db", "KB_DB_PATH2", "extras");
+                : EXTRAS_DB_CLASSPATH;
+        warnIfClasspathOverride(configured, EXTRAS_DB_ENV, EXTRAS_DB_CLASSPATH);
+        return resolve(configured, EXTRAS_DB_CLASSPATH, EXTRAS_DB_ENV, "extras");
     }
 
     /**
@@ -101,17 +110,15 @@ public class DbResolver {
                         "  Example:%n    export %s=/var/lib/3gpp-kb/%s%n" +
                         "  See README.production.md for full deployment instructions.",
                         label, classpathLocation, envVar, envVar,
-                        envVar.equals("KB_DB_PATH") ? "3gpp_certified.db" : "telecom_extras.db"));
+                        envVar.equals(PRIMARY_DB_ENV) ? "3gpp_certified.db" : "telecom_extras.db"));
             }
             // If it's a plain file (dev/exploded), use it directly
-            try {
-                Path filePath = resource.getFile().toPath();
+            Path filePath = asFilePath(resource);
+            if (filePath != null) {
                 log.info("using classpath DB (file): {}", filePath);
                 return filePath;
-            } catch (Exception ignored) {
-                // Resource is inside a JAR — extract to temp file
             }
-            Path tmp = Files.createTempFile("3gpp-", ".db");
+            Path tmp = createPrivateTempFile();
             tmp.toFile().deleteOnExit();
             try (InputStream in = resource.getInputStream()) {
                 Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
@@ -122,6 +129,34 @@ public class DbResolver {
             throw e;
         } catch (Exception e) {
             throw new IllegalStateException("Failed to resolve " + label + " DB at " + classpathLocation, e);
+        }
+    }
+
+    /**
+     * Scratch file for the JAR-extracted DB. Deliberately NOT in the shared system
+     * temp dir (/tmp is world-writable, so another local user could swap the KB
+     * between extraction and open) — it goes in a per-user directory under the
+     * home dir, created 700/600 on POSIX filesystems.
+     */
+    private static Path createPrivateTempFile() throws IOException {
+        Path dir = Path.of(System.getProperty("user.home"), ".3gpp-kb", "extracted");
+        if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+            Files.createDirectories(dir, PosixFilePermissions.asFileAttribute(
+                    PosixFilePermissions.fromString("rwx------")));
+            return Files.createTempFile(dir, "3gpp-", ".db",
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        }
+        Files.createDirectories(dir);
+        return Files.createTempFile(dir, "3gpp-", ".db");
+    }
+
+    /** Returns the resource's filesystem path, or {@code null} when it lives inside a JAR. */
+    private static Path asFilePath(Resource resource) {
+        try {
+            return resource.getFile().toPath();
+        } catch (Exception ignored) {
+            // Resource is inside a JAR — caller extracts to a temp file
+            return null;
         }
     }
 }

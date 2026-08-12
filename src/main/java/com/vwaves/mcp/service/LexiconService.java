@@ -31,6 +31,9 @@ import org.springframework.stereotype.Service;
 public class LexiconService {
     private static final Logger log = LoggerFactory.getLogger(LexiconService.class);
 
+    /** Lexicon TSV rows are exactly: key TAB value. */
+    private static final int TSV_COLUMNS = 2;
+
     private final Set<String> stopWords;
     private final Map<String, String> andTermSubst;
     private final Set<String> non3gppIntentTerms;
@@ -90,17 +93,21 @@ public class LexiconService {
              BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#")) continue;
-                String[] parts = t.split("\t", 2);
-                if (parts.length != 2) continue;
-                String k = parts[0].strip().toLowerCase();
-                String v = parts[1].strip().toLowerCase();
-                if (!k.isEmpty() && !v.isEmpty()) out.put(k, v);
+                putTsvEntry(out, line);
             }
         } catch (IOException e) {
             log.warn("failed reading {} from {}: {}", label, path, e.getMessage());
         }
         return out;
+    }
+
+    private static void putTsvEntry(Map<String, String> out, String line) {
+        String t = line.strip();
+        if (t.isEmpty() || t.startsWith("#")) return;
+        String[] parts = t.split("\t", TSV_COLUMNS);
+        if (parts.length != TSV_COLUMNS) return;
+        String k = parts[0].strip().toLowerCase();
+        String v = parts[1].strip().toLowerCase();
+        if (!k.isEmpty() && !v.isEmpty()) out.put(k, v);
     }
 }
