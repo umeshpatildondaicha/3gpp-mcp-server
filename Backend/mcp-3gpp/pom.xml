@@ -230,4 +230,11 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- Activated by the VisionWaves Jenkins pipeline via -Pvisionwaves -->
+        <profile>
+            <id>visionwaves</id>
+        </profile>
+    </profiles>
 </project>
